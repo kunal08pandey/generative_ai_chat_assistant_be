@@ -1,0 +1,17 @@
+__pycache__/
+.DS_Store
+.env
+venv/
+.ipynb_checkpoints/
+.pytest_cache/
+.coverage
+htmlcov/
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+data/chroma/
+data/cache/
+data/embeddings/
+logs/
+*.log

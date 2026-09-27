@@ -1,0 +1,36 @@
+# Ignore virtual environments
+venv/
+.venv/
+env/
+.env/
+
+# Ignore python bytecode and cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Ignore local databases and logs
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+logs/
+app.log
+
+# Ignore git
+.git/
+.gitignore
+.github/
+
+# Ignore macOS metadata
+.DS_Store
+
+# Ignore local configs and local dev files
+.env
+.env.local
+.vscode/
+node_modules/
