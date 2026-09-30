@@ -19,6 +19,7 @@ class ModelRegistry:
     _models = {
         "ollama": ["gemma4:e4b", "qwen2.5-coder:14b", "gemma4:12b", "x/z-image-turbo:latest"],
         "llama_cpp": ["local-gguf"],
+        "gemini": ["gemini-1.5-pro", "gemini-1.5-flash", "gemini-1.5-flash-8b"],
     }
 
     @classmethod

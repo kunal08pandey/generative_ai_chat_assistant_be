@@ -28,8 +28,13 @@ def get_llm_client(provider: str, model: str) -> BaseLLM:
         logger.info(f"Creating LlamaCppClient for model={model}")
         return LlamaCppClient(model=model)
 
+    elif provider == "gemini":
+        from src.llm.gemini_client import GeminiClient
+        logger.info(f"Creating GeminiClient for model={model}")
+        return GeminiClient(model=model)
+
     else:
         raise ValueError(
             f"Unknown LLM provider: '{provider}'. "
-            f"Supported providers: ollama, llama_cpp"
+            f"Supported providers: ollama, llama_cpp, gemini"
         )
