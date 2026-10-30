@@ -6,6 +6,8 @@ Splits long document text into smaller, overlapping chunks. This ensures that
 retrieved RAG context is focused, fits cleanly in the LLM's context window,
 and avoids overloading the local generation model.
 """
+from __future__ import annotations
+
 from typing import List
 
 

@@ -107,6 +107,44 @@ async def chat(request: ChatRequest, db: aiosqlite.Connection = Depends(get_db))
 
         return StreamingResponse(stream_image_response(), media_type="text/event-stream")
 
+    # ── Semantic Router Check (Bypass foundation models for Identity/Rules) ──
+    if not (request.images and len(request.images) > 0):
+        from src.routing.semantic_router import get_semantic_router
+        semantic_router = get_semantic_router()
+        route_match = await semantic_router.match(request.query)
+        if route_match:
+            matched_route, score = route_match
+            logger.info(
+                "Semantic Router: query directly handled by route='%s' (score=%.3f) — bypassing LLM",
+                matched_route.name,
+                score,
+            )
+            now_iso = datetime.now(timezone.utc).isoformat()
+            await db.execute(
+                "INSERT INTO messages (id, conversation_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)",
+                (str(uuid.uuid4()), request.conversation_id, "user", request.query.strip(), now_iso),
+            )
+            await db.execute(
+                "INSERT INTO messages (id, conversation_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)",
+                (str(uuid.uuid4()), request.conversation_id, "assistant", matched_route.response, now_iso),
+            )
+            await db.commit()
+
+            async def stream_routed_response():
+                yield f"data: {json.dumps({'thinking': False, 'model': f'System ({matched_route.name})', 'provider': 'router'})}\n\n"
+                yield f"data: {json.dumps({'token': matched_route.response})}\n\n"
+                yield f"data: {json.dumps({'done': True})}\n\n"
+
+            return StreamingResponse(
+                stream_routed_response(),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "X-Accel-Buffering": "no",
+                },
+            )
+
     try:
         client = get_llm_client(provider=provider, model=request.model)
     except ValueError as exc:

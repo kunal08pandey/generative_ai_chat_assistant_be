@@ -5,6 +5,8 @@ llama.cpp LLM Client
 Integrates with local llama-server HTTP completion API.
 Reuses the shared HTTP connection pool client for improved request performance.
 """
+from __future__ import annotations
+
 import json
 import os
 from typing import AsyncIterator

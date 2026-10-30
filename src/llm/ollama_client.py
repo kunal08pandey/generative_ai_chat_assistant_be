@@ -5,6 +5,8 @@ Ollama LLM Client
 Integrates with local Ollama HTTP API.
 Reuses the shared HTTP connection pool client and resolves host environment dynamically.
 """
+from __future__ import annotations
+
 import json
 from typing import AsyncIterator
 

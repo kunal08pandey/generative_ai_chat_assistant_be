@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import io
 import re
+from typing import Optional
 from fastapi import APIRouter
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
@@ -29,7 +30,7 @@ class ExportDocxRequest(BaseModel):
 class ExportFileRequest(BaseModel):
     filename: str
     content: str
-    mime_type: str | None = None
+    mime_type: Optional[str] = None
 
 
 @router.post("/docx")

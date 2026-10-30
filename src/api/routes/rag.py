@@ -49,6 +49,43 @@ async def rag(request: RagRequest, db: aiosqlite.Connection = Depends(get_db)):
         request.provider,
     )
 
+    # ── Semantic Router Check (Identity / Deterministic bypass) ──────────
+    from src.routing.semantic_router import get_semantic_router
+    semantic_router = get_semantic_router()
+    route_match = await semantic_router.match(request.query)
+    if route_match:
+        matched_route, score = route_match
+        logger.info(
+            "Semantic Router (RAG): query handled by route='%s' (score=%.3f) — bypassing RAG/LLM",
+            matched_route.name,
+            score,
+        )
+        now_iso = datetime.now(timezone.utc).isoformat()
+        await db.execute(
+            "INSERT INTO messages (id, conversation_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)",
+            (str(uuid.uuid4()), request.conversation_id, "user", request.query.strip(), now_iso),
+        )
+        await db.execute(
+            "INSERT INTO messages (id, conversation_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)",
+            (str(uuid.uuid4()), request.conversation_id, "assistant", matched_route.response, now_iso),
+        )
+        await db.commit()
+
+        async def stream_routed_rag():
+            yield f"data: {json.dumps({'status': f'Matched semantic route: {matched_route.name}'})}\n\n"
+            yield f"data: {json.dumps({'token': matched_route.response})}\n\n"
+            yield f"data: {json.dumps({'done': True})}\n\n"
+
+        return StreamingResponse(
+            stream_routed_rag(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
     # ── Fetch Past Conversation History for Context ──────────────────────
     cursor = await db.execute(
         "SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY created_at ASC",
