@@ -12,7 +12,7 @@ from typing import List
 
 import httpx
 
-from src.utils.host_resolver import get_ollama_host
+from src.settings import OLLAMA_BASE_URL
 from src.utils.http_client import get_http_client
 from src.utils.logger import get_logger
 
@@ -54,13 +54,12 @@ async def embed(texts: List[str]) -> List[List[float]]:
         return []
 
     client = get_http_client()
-    host = get_ollama_host()
-    url = f"http://{host}:11434/api/embed"
+    url = f"{OLLAMA_BASE_URL}/api/embed"
 
     # ── 1. Check if Ollama has an embedding model ──────────────────────
     embed_model = _DEFAULT_EMBED_MODEL
     try:
-        tags_res = await client.get(f"http://{host}:11434/api/tags", timeout=2.0)
+        tags_res = await client.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=2.0)
         if tags_res.status_code == 200:
             models_data = tags_res.json().get("models", [])
             installed_names = [m.get("name", "") for m in models_data]

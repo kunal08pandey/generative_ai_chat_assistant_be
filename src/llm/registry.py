@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import httpx
 
-from src.utils.host_resolver import get_ollama_host
+from src.settings import OLLAMA_BASE_URL
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -17,9 +17,16 @@ logger = get_logger(__name__)
 
 class ModelRegistry:
     _models = {
-        "ollama": ["gemma4:e4b", "qwen2.5-coder:14b", "gemma4:12b", "x/z-image-turbo:latest"],
+        "ollama": ["gemma4:e4b", "qwen2.5-coder:14b", "gemma4:12b", "x/flux2-klein"],
         "llama_cpp": ["local-gguf"],
-        "gemini": ["gemini-1.5-pro-latest", "gemini-1.5-flash-latest", "gemini-1.5-flash-8b-latest"],
+        "gemini": [
+            "gemini-3.5-flash",
+            "gemini-3.5-flash-lite",
+            "gemini-3.1-flash-lite",
+            "gemini-3-flash-preview",
+            "gemini-3.1-pro-preview",
+            "gemini-4-argon",
+        ],
     }
 
     @classmethod
@@ -27,8 +34,7 @@ class ModelRegistry:
         """
         Dynamically query local Ollama daemon to discover installed models.
         """
-        host = get_ollama_host()
-        url = f"http://{host}:11434/api/tags"
+        url = f"{OLLAMA_BASE_URL}/api/tags"
         try:
             with httpx.Client(timeout=3.0) as client:
                 res = client.get(url)
@@ -38,6 +44,8 @@ class ModelRegistry:
                         m["name"] for m in data.get("models", []) if "name" in m
                     ]
                     if discovered:
+                        if "x/flux2-klein" not in discovered:
+                            discovered.append("x/flux2-klein")
                         cls._models["ollama"] = list(dict.fromkeys(discovered))
                         logger.info("Discovered %d Ollama models: %s", len(discovered), discovered)
         except Exception as e:
@@ -83,4 +91,7 @@ class ModelRegistry:
         for provider, models in cls._models.items():
             if model_name in models:
                 return provider
+        normalized = (model_name or "").lower().strip()
+        if "gemini" in normalized or "argon" in normalized:
+            return "gemini"
         return "ollama"

@@ -91,3 +91,49 @@ async def add_message(
     )
     logger.info("Added %s message to conversation %s", data.role, data.conversation_id)
     return ok(data=message.model_dump())
+
+
+@router.delete("/messages/{message_id}", status_code=204)
+async def delete_message(
+    message_id: str,
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """
+    Delete a specific message from a conversation by message ID.
+    """
+    cursor = await db.execute("SELECT id, conversation_id FROM messages WHERE id = ?", (message_id,))
+    row = await cursor.fetchone()
+    if not row:
+        logger.warning("Message not found for deletion — id=%s", message_id)
+        raise HTTPException(status_code=404, detail=f"Message {message_id} not found")
+
+    await db.execute("DELETE FROM messages WHERE id = ?", (message_id,))
+    await db.commit()
+
+    logger.info("Deleted message id=%s from conversation %s", message_id, row["conversation_id"])
+    return None
+
+
+@router.delete("/conversations/{conv_id}/messages/{message_id}", status_code=204)
+async def delete_conversation_message(
+    conv_id: str,
+    message_id: str,
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """
+    Delete a specific message from a designated conversation.
+    """
+    cursor = await db.execute(
+        "SELECT id FROM messages WHERE id = ? AND conversation_id = ?",
+        (message_id, conv_id),
+    )
+    row = await cursor.fetchone()
+    if not row:
+        logger.warning("Message %s not found in conversation %s", message_id, conv_id)
+        raise HTTPException(status_code=404, detail=f"Message {message_id} not found in conversation {conv_id}")
+
+    await db.execute("DELETE FROM messages WHERE id = ?", (message_id,))
+    await db.commit()
+
+    logger.info("Deleted message id=%s from conversation %s", message_id, conv_id)
+    return None

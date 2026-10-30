@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
-load_dotenv(BACKEND_ROOT / ".env")
+load_dotenv(BACKEND_ROOT / ".env", override=True)
 
 
 def _project_path(env_name: str, default: str) -> Path:

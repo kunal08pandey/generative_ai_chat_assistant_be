@@ -130,7 +130,7 @@ async def clear_all_conversations(db: aiosqlite.Connection = Depends(get_db)):
 
 
 # ── DELETE ONE ───────────────────────────────────────────────────────────
-@router.delete("/conversations/{conv_id}")
+@router.delete("/conversations/{conv_id}", status_code=204)
 async def delete_conversation(
     conv_id: str,
     db: aiosqlite.Connection = Depends(get_db),
@@ -181,3 +181,32 @@ async def rollback_last_interaction(
     
     logger.info("Rolled back last interaction in conv=%s (deleted message IDs: %s)", conv_id, ids_to_delete)
     return ok(data={"deleted_count": len(ids_to_delete)})
+
+
+@router.post("/conversations/{conv_id}/rollback-to/{message_id}")
+async def rollback_to_message(
+    conv_id: str,
+    message_id: str,
+    db: aiosqlite.Connection = Depends(get_db)
+):
+    """
+    Roll back conversation to a specific message:
+    Deletes the target message and all subsequent messages in the conversation.
+    """
+    cursor = await db.execute(
+        "SELECT created_at FROM messages WHERE id = ? AND conversation_id = ?",
+        (message_id, conv_id)
+    )
+    target = await cursor.fetchone()
+    if not target:
+        # Fallback to rolling back last interaction
+        return await rollback_last_interaction(conv_id, db)
+
+    await db.execute(
+        "DELETE FROM messages WHERE conversation_id = ? AND created_at >= ?",
+        (conv_id, target["created_at"])
+    )
+    await db.commit()
+    logger.info("Rolled back conversation %s to message %s", conv_id, message_id)
+    return ok(data={"message": "Rolled back successfully"})
+

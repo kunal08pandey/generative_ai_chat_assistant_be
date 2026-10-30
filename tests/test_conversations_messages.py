@@ -52,3 +52,50 @@ def test_message_history_accepts_maximum_page_size(client, conversation):
     )
     assert response.status_code == 200
     assert response.json()["meta"]["page_size"] == 200
+
+
+def test_delete_message_lifecycle(client, conversation):
+    created = client.post(
+        "/messages",
+        json={
+            "conversation_id": conversation["id"],
+            "role": "user",
+            "content": "Message to be deleted",
+        },
+    )
+    assert created.status_code == 201
+    msg_id = created.json()["data"]["id"]
+
+    deleted = client.delete(f"/messages/{msg_id}")
+    assert deleted.status_code == 204
+    assert deleted.content == b""
+
+    history = client.get(f"/messages/{conversation['id']}")
+    assert history.status_code == 200
+    assert not any(m["id"] == msg_id for m in history.json()["data"])
+
+
+def test_delete_conversation_message_scoped(client, conversation):
+    created = client.post(
+        "/messages",
+        json={
+            "conversation_id": conversation["id"],
+            "role": "user",
+            "content": "Message for scoped deletion",
+        },
+    )
+    assert created.status_code == 201
+    msg_id = created.json()["data"]["id"]
+
+    deleted = client.delete(f"/conversations/{conversation['id']}/messages/{msg_id}")
+    assert deleted.status_code == 204
+
+    # 404 when deleting already deleted message
+    not_found = client.delete(f"/conversations/{conversation['id']}/messages/{msg_id}")
+    assert not_found.status_code == 404
+
+
+def test_delete_nonexistent_message_returns_404(client):
+    response = client.delete("/messages/nonexistent-id-999")
+    assert response.status_code == 404
+

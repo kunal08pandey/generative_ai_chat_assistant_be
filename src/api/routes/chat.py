@@ -13,6 +13,7 @@ Supports:
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from datetime import datetime, timezone
 
@@ -25,6 +26,7 @@ from src.db.database import get_db, get_db_path
 from src.llm.client_factory import get_llm_client
 from src.llm.registry import ModelRegistry
 from src.prompt_engineering.few_shot import FewShotPromptTemplate
+from src.utils.error_parser import parse_llm_error
 from src.utils.logger import get_logger
 from src.utils.rate_limiter import RateLimiter
 
@@ -61,14 +63,45 @@ async def chat(request: ChatRequest, db: aiosqlite.Connection = Depends(get_db))
     provider = request.provider or ModelRegistry.get_provider_for_model(request.model) or "ollama"
     logger.info("Using provider=%s for model=%s", provider, request.model)
 
-    # If x/flux2-klein or image prompt, handle via 2-Stage Image Generator
-    if "flux" in request.model.lower() or request.query.lower().startswith("generate an image"):
+    # Detect image generation intent
+    query_lower = request.query.strip().lower()
+    is_gemini_model = "gemini" in request.model.lower() or "argon" in request.model.lower()
+    is_flux_model = "flux" in request.model.lower()
+
+    is_image_prompt = bool(re.search(
+        r"^(?:please\s+|can\s+you\s+(?:please\s+)?|could\s+you\s+(?:please\s+)?|i\s+want\s+(?:you\s+to\s+)?|help\s+me\s+)?(?:generate|create|draw|make|render|produce)\s+(?:an?\s+)?(?:image|picture|photo|photograph|illustration|drawing|art|portrait|wallpaper)",
+        query_lower,
+    )) or bool(re.match(r"^(draw|paint|render)\s+", query_lower)) or any(query_lower.startswith(p) for p in [
+        "generate an image", "generate image", "create an image", "create a picture",
+        "draw a picture", "draw an image", "generate a photo", "make an image",
+        "show me an image", "draw ", "create image", "paint ",
+    ])
+
+    # Route image generation requests:
+    # If Gemini model is selected → generates with Gemini (Flash or Flash-Lite)
+    # If non-Gemini model is selected → generates with x/flux2-klein
+    if is_flux_model or is_image_prompt:
         from src.api.routes.image import generate_image, ImageGenRequest
-        img_req = ImageGenRequest(prompt=request.query, model=request.model, conversation_id=request.conversation_id)
+        active_img_model = request.model if is_gemini_model else "x/flux2-klein"
+        img_req = ImageGenRequest(prompt=request.query, model=active_img_model, conversation_id=request.conversation_id)
         img_res = await generate_image(img_req, db)
         content = img_res["data"]["content"]
 
+        if is_gemini_model:
+            model_lower = request.model.lower()
+            if "lite" in model_lower:
+                thinking_label = "Gemini Flash-Lite"
+            elif "flash" in model_lower:
+                thinking_label = "Gemini Flash"
+            else:
+                thinking_label = f"Gemini ({request.model})"
+            thinking_provider = "gemini"
+        else:
+            thinking_label = "x/flux2-klein"
+            thinking_provider = "ollama"
+
         async def stream_image_response():
+            yield f"data: {json.dumps({'thinking': True, 'model': thinking_label, 'provider': thinking_provider})}\n\n"
             yield f"data: {json.dumps({'token': content})}\n\n"
             yield f"data: {json.dumps({'done': True})}\n\n"
 
@@ -113,13 +146,17 @@ async def chat(request: ChatRequest, db: aiosqlite.Connection = Depends(get_db))
     elif history_text:
         prompt = (
             "You are a helpful, expert AI assistant engaged in an ongoing conversation.\n"
-            "Maintain full context from previous turns and respond directly to the user's latest message.\n\n"
+            "Maintain full context from previous turns and respond directly to the user's latest message.\n"
+            "When the user asks for an Excel file or spreadsheet (.xlsx), format the data cleanly as a markdown table or CSV block so it can be exported directly to Excel.\n\n"
             f"=== Conversation History ===\n{history_text}\n\n"
             f"User: {request.query}\nAssistant:"
         )
     else:
         chat_template = FewShotPromptTemplate(
-            prefix="You are a helpful and expert AI assistant. Please provide concise, accurate, and structured answers.",
+            prefix=(
+                "You are a helpful and expert AI assistant. Please provide concise, accurate, and structured answers. "
+                "When the user asks for an Excel file or spreadsheet (.xlsx), format the data cleanly as a markdown table or CSV block so it can be exported directly to Excel."
+            ),
             examples=[
                 {"input": "Hi there!", "output": "Hello! How can I help you today?"},
                 {"input": "What is the capital of France?", "output": "The capital of France is Paris."},
@@ -134,10 +171,17 @@ async def chat(request: ChatRequest, db: aiosqlite.Connection = Depends(get_db))
     db_path = get_db_path()
 
     async def stream_and_save():
-        """Generator that streams SSE tokens and saves the full response."""
+        """Generator that streams SSE tokens and saves the full response.
+        
+        Emits a 'thinking' event before tokens start so the frontend
+        can display a Gemini-style "Thinking…" indicator.
+        """
         full_response: list[str] = []
         save_db: aiosqlite.Connection | None = None
         try:
+            # Send a thinking event so frontend shows collapsible thinking indicator
+            yield f"data: {json.dumps({'thinking': True, 'model': request.model, 'provider': provider})}\n\n"
+
             async for token in client.generate_stream(prompt, images=request.images):
                 full_response.append(token)
                 yield f"data: {json.dumps({'token': token})}\n\n"
@@ -146,7 +190,8 @@ async def chat(request: ChatRequest, db: aiosqlite.Connection = Depends(get_db))
 
         except Exception as e:
             logger.error("Chat streaming error: %s", e, exc_info=True)
-            yield f"data: {json.dumps({'error': 'Generation failed. Please try again.'})}\n\n"
+            error_payload = parse_llm_error(e, model=request.model)
+            yield f"data: {json.dumps({'error': error_payload})}\n\n"
             return
         finally:
             # ── Persist assistant response ───────────────────────────────

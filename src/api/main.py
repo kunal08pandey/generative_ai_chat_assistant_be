@@ -14,6 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from src.api.routes import (
     chat,
     conversations,
+    export,
     health,
     image,
     logs,
@@ -134,3 +135,4 @@ app.include_router(upload.router)
 app.include_router(conversations.router)
 app.include_router(messages.router)
 app.include_router(logs.router)
+app.include_router(export.router)

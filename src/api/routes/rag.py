@@ -25,6 +25,7 @@ from src.llm.registry import ModelRegistry
 from src.prompt_engineering.chainer import LLMChain
 from src.prompt_engineering.templates import PromptTemplate
 from src.rag.retriever import retrieve_context
+from src.utils.error_parser import parse_llm_error
 from src.utils.logger import get_logger
 from src.utils.rate_limiter import RateLimiter
 
@@ -150,7 +151,8 @@ async def rag(request: RagRequest, db: aiosqlite.Connection = Depends(get_db)):
 
         except Exception as e:
             logger.error("RAG streaming error: %s", e, exc_info=True)
-            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+            error_payload = parse_llm_error(e, model=request.model)
+            yield f"data: {json.dumps({'error': error_payload})}\n\n"
             return
         finally:
             # ── Save Complete Assistant Message ───────────────────────────

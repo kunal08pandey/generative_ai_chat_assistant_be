@@ -11,8 +11,8 @@ from typing import AsyncIterator
 import httpx
 
 from .base import BaseLLM
+from src.settings import OLLAMA_BASE_URL
 from src.utils.cache import llm_cache
-from src.utils.host_resolver import get_ollama_host
 from src.utils.http_client import get_http_client
 from src.utils.logger import get_logger
 from src.utils.token_counter import count_tokens
@@ -23,10 +23,9 @@ logger = get_logger(__name__)
 class OllamaClient(BaseLLM):
 
     def __init__(self, model: str):
-        host = get_ollama_host()
-        self.base_url = f"http://{host}:11434/api/generate"
+        self.base_url = f"{OLLAMA_BASE_URL}/api/generate"
         self.model = model
-        logger.info("Initialized OllamaClient with model=%s, host=%s", model, host)
+        logger.info("Initialized OllamaClient with model=%s, base_url=%s", model, self.base_url)
 
     async def generate(self, prompt: str, images: list[str] | None = None) -> str:
         """Full (non-streaming) generation. Used by RAG sub-chains."""
