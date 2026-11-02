@@ -18,7 +18,7 @@ import uuid
 from datetime import datetime, timezone
 
 import aiosqlite
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from src.api.schemas import ChatRequest
@@ -27,6 +27,7 @@ from src.llm.client_factory import get_llm_client
 from src.llm.registry import ModelRegistry
 from src.prompt_engineering.few_shot import FewShotPromptTemplate
 from src.utils.error_parser import parse_llm_error
+from src.utils.host_resolver import is_localhost_request
 from src.utils.logger import get_logger
 from src.utils.rate_limiter import RateLimiter
 
@@ -35,7 +36,7 @@ router = APIRouter()
 
 
 @router.post("/", dependencies=[Depends(RateLimiter(max_requests=120, window_seconds=60))])
-async def chat(request: ChatRequest, db: aiosqlite.Connection = Depends(get_db)):
+async def chat(request: ChatRequest, http_request: Request, db: aiosqlite.Connection = Depends(get_db)):
     """
     Stream a chat response from the selected LLM.
 
@@ -62,6 +63,13 @@ async def chat(request: ChatRequest, db: aiosqlite.Connection = Depends(get_db))
     # ── Resolve provider & create client before persisting the message ───
     provider = request.provider or ModelRegistry.get_provider_for_model(request.model) or "ollama"
     logger.info("Using provider=%s for model=%s", provider, request.model)
+
+    # Security check: Ollama is strictly accessible on localhost
+    if provider == "ollama" and not is_localhost_request(http_request):
+        raise HTTPException(
+            status_code=403,
+            detail="Ollama models are only available on localhost",
+        )
 
     # Detect image generation intent
     query_lower = request.query.strip().lower()

@@ -187,3 +187,34 @@ class HealthResponse(BaseModel):
     timestamp: str
     services: List[ServiceStatus]
     system: Optional[dict] = None
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Auth Schemas
+# ═══════════════════════════════════════════════════════════════════════════
+
+class GoogleAuthRequest(BaseModel):
+    """Request payload for Google sign-in."""
+    credential: Optional[str] = Field(None, description="Google OAuth ID token JWT")
+    email: Optional[str] = Field(None, description="User email (for demo/fallback)")
+    name: Optional[str] = Field(None, description="User display name")
+    picture: Optional[str] = Field(None, description="User avatar image URL")
+    google_id: Optional[str] = Field(None, description="Google user identifier (sub)")
+
+
+class UserOut(BaseModel):
+    """Public user profile."""
+    id: str
+    email: str
+    name: str
+    picture: Optional[str] = None
+    provider: str = "google"
+    created_at: str
+    last_login: str
+
+
+class AuthResponse(BaseModel):
+    """Authentication response payload."""
+    user: UserOut
+    token: str
+

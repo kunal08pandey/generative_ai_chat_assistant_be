@@ -89,6 +89,18 @@ def init_db() -> None:
         )
     """)
 
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id          TEXT PRIMARY KEY,
+            email       TEXT UNIQUE NOT NULL,
+            name        TEXT NOT NULL,
+            picture     TEXT,
+            provider    TEXT DEFAULT 'google',
+            created_at  TEXT NOT NULL,
+            last_login  TEXT NOT NULL
+        )
+    """)
+
     # Performance indexes
     cur.execute("""
         CREATE INDEX IF NOT EXISTS idx_messages_conversation_id
@@ -101,6 +113,10 @@ def init_db() -> None:
     cur.execute("""
         CREATE INDEX IF NOT EXISTS idx_messages_created_at
         ON messages (created_at ASC)
+    """)
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_users_email
+        ON users (email)
     """)
 
     conn.commit()

@@ -12,6 +12,8 @@ def get_llm_client(provider: str, model: str) -> BaseLLM:
     Supported providers:
         - "ollama"    → OllamaClient
         - "llama_cpp" → LlamaCppClient
+        - "gemini"    → GeminiClient
+        - "groq"      → GroqClient
 
     :param provider: The backend provider identifier.
     :param model: The model name to pass to the client.
@@ -33,8 +35,13 @@ def get_llm_client(provider: str, model: str) -> BaseLLM:
         logger.info(f"Creating GeminiClient for model={model}")
         return GeminiClient(model=model)
 
+    elif provider == "groq":
+        from src.llm.groq_client import GroqClient
+        logger.info(f"Creating GroqClient for model={model}")
+        return GroqClient(model=model)
+
     else:
         raise ValueError(
             f"Unknown LLM provider: '{provider}'. "
-            f"Supported providers: ollama, llama_cpp, gemini"
+            f"Supported providers: ollama, llama_cpp, gemini, groq"
         )

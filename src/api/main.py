@@ -12,6 +12,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from src.api.routes import (
+    auth,
     chat,
     conversations,
     export,
@@ -126,6 +127,7 @@ app.add_middleware(
 
 
 # ── 5. Router Registrations ────────────────────────────────────────────────
+app.include_router(auth.router, prefix="/auth")
 app.include_router(health.router)
 app.include_router(chat.router, prefix="/chat")
 app.include_router(rag.router, prefix="/rag")

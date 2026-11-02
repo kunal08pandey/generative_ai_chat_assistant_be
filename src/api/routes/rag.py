@@ -15,7 +15,7 @@ import uuid
 from datetime import datetime, timezone
 
 import aiosqlite
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from src.api.schemas import RagRequest
@@ -26,6 +26,7 @@ from src.prompt_engineering.chainer import LLMChain
 from src.prompt_engineering.templates import PromptTemplate
 from src.rag.retriever import retrieve_context
 from src.utils.error_parser import parse_llm_error
+from src.utils.host_resolver import is_localhost_request
 from src.utils.logger import get_logger
 from src.utils.rate_limiter import RateLimiter
 
@@ -34,7 +35,7 @@ router = APIRouter(tags=["chat", "rag"])
 
 
 @router.post("/", dependencies=[Depends(RateLimiter(max_requests=120, window_seconds=60))])
-async def rag(request: RagRequest, db: aiosqlite.Connection = Depends(get_db)):
+async def rag(request: RagRequest, http_request: Request, db: aiosqlite.Connection = Depends(get_db)):
     """
     Execute a RAG query and stream status updates and final answer tokens.
 
@@ -48,6 +49,13 @@ async def rag(request: RagRequest, db: aiosqlite.Connection = Depends(get_db)):
         request.model,
         request.provider,
     )
+
+    provider = request.provider or ModelRegistry.get_provider_for_model(request.model) or "ollama"
+    if provider == "ollama" and not is_localhost_request(http_request):
+        raise HTTPException(
+            status_code=403,
+            detail="Ollama models are only available on localhost",
+        )
 
     # ── Semantic Router Check (Identity / Deterministic bypass) ──────────
     from src.routing.semantic_router import get_semantic_router
