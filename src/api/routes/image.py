@@ -35,7 +35,7 @@ router = APIRouter(tags=["Image Generation"])
 
 class ImageGenRequest(BaseModel):
     prompt: str = Field(..., min_length=2, description="Text description of the image to generate")
-    model: str = Field("x/flux2-klein", description="Selected model identifier")
+    model: str = Field("x/flux2-klein:9b", description="Selected model identifier")
     conversation_id: str = Field(..., min_length=1, description="Conversation thread ID")
 
 

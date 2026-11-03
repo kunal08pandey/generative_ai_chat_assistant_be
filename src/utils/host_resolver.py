@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import socket
+import ipaddress
 from typing import Any
 
 LOCALHOST_HOSTS = {
@@ -25,6 +26,8 @@ LOCALHOST_HOSTS = {
 def is_localhost(host: str | None) -> bool:
     """
     Check if a given host/IP string represents localhost / loopback.
+    Handles IPv4 loopback (127.0.0.0/8), IPv6 loopback (::1),
+    and IPv4-mapped IPv6 loopback (e.g. ::ffff:127.0.0.1).
     """
     if not host:
         return False
@@ -33,6 +36,16 @@ def is_localhost(host: str | None) -> bool:
         return True
     if normalized.startswith("127."):
         return True
+    if normalized.startswith("::ffff:127.") or normalized == "::ffff:localhost":
+        return True
+    try:
+        ip = ipaddress.ip_address(normalized)
+        if ip.is_loopback:
+            return True
+        if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped and ip.ipv4_mapped.is_loopback:
+            return True
+    except ValueError:
+        pass
     return False
 
 
@@ -40,8 +53,12 @@ def is_localhost_request(request: Any) -> bool:
     """
     Determine if an incoming HTTP request originates from localhost.
     Checks direct client host, X-Forwarded-For, and X-Real-IP headers.
+    Supports ALLOW_REMOTE_OLLAMA=true for local network development.
     """
     if request is None:
+        return True
+
+    if os.environ.get("ALLOW_REMOTE_OLLAMA", "").strip().lower() in ("true", "1", "yes"):
         return True
 
     # 1. Direct client host
