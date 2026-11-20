@@ -3,10 +3,10 @@ Image Generation Endpoint
 ===========================
 
 ``POST /generate-image`` — Dual AI Image Generation System:
-  • Gemini Mode: Generates high-resolution images via Google Gemini Imagen 3 (imagen-3.0-generate-002)
-    when a Gemini model is active, with seamless Flux fallback.
-  • Local / Non-Gemini Mode: 2-stage generation using text LLM prompt expansion + Ollama x/flux2-klein engine.
-  • Persists user query and image response into SQLite database (chat.db).
+  • Gemini Mode: Generates images via Google Gemini Imagen when a Gemini model is active.
+  • Local / Non-Gemini Mode: 2-stage generation using text LLM prompt expansion + Ollama engine.
+  • Transparent fallback with accurate provider labeling (audit S7).
+  • Strictly scoped to authenticated owner's conversation (Phase 1).
 """
 import base64
 import os
@@ -22,6 +22,7 @@ from dotenv import load_dotenv
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from src.api.dependencies.auth import get_current_user
 from src.api.schemas import ok
 from src.db.database import get_db
 from src.llm.client_factory import get_llm_client
@@ -44,7 +45,6 @@ def _get_gemini_api_key() -> str:
     api_key = (os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or "").strip()
     if not api_key:
         current_file = Path(__file__).resolve()
-        # backend root is 4 levels up: routes -> api -> src -> backend
         backend_dir = current_file.parent.parent.parent.parent
         for candidate in [
             backend_dir / ".env",
@@ -60,12 +60,8 @@ def _get_gemini_api_key() -> str:
 
 async def generate_gemini_image(prompt: str, model: str = "gemini-3.5-flash") -> tuple[str, str, str]:
     """
-    Generate an image using Gemini only.
-    Differentiates between Gemini Flash and Gemini Flash-Lite based on the selected model.
-    Uses Google Gemini's native API models and Gemini visual synthesis engine.
-    
-    Returns:
-        (image_url_or_data_url, generator_name, enhanced_desc)
+    Generate an image using Gemini.
+    Returns: (image_url_or_data_url, generator_name, enhanced_desc)
     """
     model_lower = (model or "").lower()
     if "flash-lite" in model_lower or "lite" in model_lower:
@@ -91,7 +87,7 @@ async def generate_gemini_image(prompt: str, model: str = "gemini-3.5-flash") ->
             client = genai.Client(api_key=api_key)
             logger.info("Generating image with %s (%s) for prompt: '%s'", gemini_variant, gemini_model_name, prompt[:70])
 
-            # 1. Attempt native Gemini image generation if available on model/API key
+            # 1. Attempt native Gemini image generation
             for cand in cand_models:
                 try:
                     res = await client.aio.models.generate_content(
@@ -109,14 +105,14 @@ async def generate_gemini_image(prompt: str, model: str = "gemini-3.5-flash") ->
                 except Exception as cand_err:
                     logger.debug("Gemini native image candidate %s attempt: %s", cand, cand_err)
 
-            # 2. Use Gemini Flash / Flash-Lite to synthesize the visual scene description
+            # 2. Use Gemini Flash to synthesize the visual scene description
             try:
                 expansion_res = await client.aio.models.generate_content(
                     model=gemini_model_name,
                     contents=(
                         "You are Google Gemini's creative image generator engine. "
-                        "Given the user's prompt, generate a vivid, rich, photorealistic scene description (under 40 words) "
-                        "detailing subject, environment, lighting, and artistic style. "
+                        "Given the user's prompt, generate a vivid scene description (under 40 words) "
+                        "detailing subject, environment, lighting, and style. "
                         "Return ONLY the prompt description, without quotes or conversational prefix.\n\n"
                         f"User Request: {prompt}"
                     ),
@@ -132,22 +128,18 @@ async def generate_gemini_image(prompt: str, model: str = "gemini-3.5-flash") ->
         except Exception as exc:
             logger.warning("Gemini image processing issue: %s", exc)
 
+    # Transparent fallback label (audit S7 fix: truthfully state Pollinations.ai fallback)
     encoded = urllib.parse.quote(enhanced_desc)
     seed = random.randint(100000, 999999)
     image_url = f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024&nologo=true&seed={seed}"
-    return image_url, gemini_variant, enhanced_desc
+    return image_url, f"{gemini_variant} (via Pollinations fallback)", enhanced_desc
 
 
 async def generate_flux2_klein_image(prompt: str) -> tuple[str, str]:
     """
     Generate an image using x/flux2-klein.
-    1. Attempts to generate via local Ollama daemon if x/flux2-klein is available.
-    2. Falls back to high-definition Flux generation engine.
-    
-    Returns:
-        (image_url_or_data_url, generator_name)
+    Returns: (image_url_or_data_url, generator_name)
     """
-    # Attempt local Ollama x/flux2-klein
     try:
         from src.settings import OLLAMA_BASE_URL
         from src.utils.http_client import get_http_client
@@ -165,37 +157,50 @@ async def generate_flux2_klein_image(prompt: str) -> tuple[str, str]:
                     b64_img = data.get("image")
                     if b64_img:
                         logger.info("Successfully generated image with local Ollama %s", model_tag)
-                        return f"data:image/png;base64,{b64_img}", "x/flux2-klein"
+                        return f"data:image/png;base64,{b64_img}", f"Ollama {model_tag}"
             except Exception as model_err:
                 logger.debug("Local Ollama %s attempt: %s", model_tag, model_err)
     except Exception as exc:
         logger.debug("Local Ollama x/flux2-klein unavailable: %s", exc)
 
-    # High-definition Flux engine
     encoded = urllib.parse.quote(prompt)
     seed = random.randint(100000, 999999)
     fallback_url = f"https://image.pollinations.ai/prompt/{encoded}?model=flux&width=1024&height=1024&nologo=true&seed={seed}"
-    return fallback_url, "x/flux2-klein"
+    return fallback_url, "Flux (via Pollinations fallback)"
 
 
 @router.post("/generate-image", dependencies=[Depends(RateLimiter(max_requests=60, window_seconds=60))])
 @router.post("/generate-image/", dependencies=[Depends(RateLimiter(max_requests=60, window_seconds=60))])
-async def generate_image(request: ImageGenRequest, db: aiosqlite.Connection = Depends(get_db)):
+async def generate_image(
+    request: ImageGenRequest,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
     """
     Execute AI Image Generation Pipeline.
-    • If a Gemini model is selected → generates image using Gemini (Imagen 3).
-    • If a non-Gemini model is selected → generates image using x/flux2-klein.
+    Strictly scoped to the authenticated user's conversation.
     """
+    user_id = user["id"]
     raw_prompt = request.prompt.strip()
     if not raw_prompt:
         raise HTTPException(status_code=400, detail="Image prompt cannot be empty")
 
+    # ── Verify conversation ownership ─────────────────────────────────
+    cursor = await db.execute(
+        "SELECT id, owner_id FROM conversations WHERE id = ?",
+        (request.conversation_id,),
+    )
+    conv_row = await cursor.fetchone()
+    if not conv_row:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    if conv_row["owner_id"] and conv_row["owner_id"] != user_id:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
     model_name = request.model or ""
     is_gemini = "gemini" in model_name.lower() or "argon" in model_name.lower()
-    logger.info("Image generation request for conv=%s | model=%s (is_gemini=%s) | prompt='%s'",
-                request.conversation_id, model_name, is_gemini, raw_prompt)
+    logger.info("Image generation request for conv=%s | user=%s | model=%s | prompt='%s'",
+                request.conversation_id, user_id, model_name, raw_prompt)
 
-    # Clean up common prompt command prefixes and conversational padding
     clean_prompt = re.sub(
         r"^(?:please\s+|can\s+you\s+(?:please\s+)?|could\s+you\s+(?:please\s+)?|i\s+want\s+(?:you\s+to\s+)?|help\s+me\s+)?(?:generate|create|draw|make|render|produce)\s+(?:an?\s+)?(?:image|picture|photo|photograph|illustration|drawing|art|portrait|wallpaper)\s+(?:of|for|with|showing|depicting)\s+",
         "",
@@ -203,25 +208,13 @@ async def generate_image(request: ImageGenRequest, db: aiosqlite.Connection = De
         flags=re.IGNORECASE,
     ).strip(" :,-\" '")
 
-    if clean_prompt == raw_prompt:
-        for prefix in [
-            "generate an image of", "generate an image for", "generate image of",
-            "create an image of", "create an image for", "create a picture of",
-            "draw a picture of", "draw an image of", "generate a photo of",
-            "make an image of", "draw ", "create image of", "paint ",
-        ]:
-            if clean_prompt.lower().startswith(prefix):
-                clean_prompt = clean_prompt[len(prefix):].strip(" :,-\" '")
-                break
-
     clean_prompt = clean_prompt.strip('"\'')
     enhanced_prompt = clean_prompt or raw_prompt
 
     if is_gemini:
-        # ── GEMINI IMAGE GENERATION (Flash / Flash-Lite) ──────────────────────
         image_url, generator_name, enhanced_desc = await generate_gemini_image(enhanced_prompt, model=model_name)
         detail_line = (
-            f"✨ **Gemini Scene Synthesis:** *{enhanced_desc}*\n"
+            f"✨ **Scene Synthesis:** *{enhanced_desc}*\n"
             if enhanced_desc and enhanced_desc != (clean_prompt or raw_prompt)
             else ""
         )
@@ -232,11 +225,7 @@ async def generate_image(request: ImageGenRequest, db: aiosqlite.Connection = De
             f"{detail_line}"
         )
     else:
-        # ── NON-GEMINI / x/flux2-klein PIPELINE ──────────────────────────────
-        generator_name = "x/flux2-klein"
         text_model = None
-
-        # Stage 1: Optional LLM Prompt Expansion (using local model if available)
         try:
             available_models = ModelRegistry.get_available_models()
             candidates = [m for m in available_models if "flux" not in m.lower() and "embed" not in m.lower() and "gemini" not in m.lower()]
@@ -249,7 +238,7 @@ async def generate_image(request: ImageGenRequest, db: aiosqlite.Connection = De
 
                 expansion_query = (
                     "You are an expert Diffusion image prompt engineer.\n"
-                    "Expand the following simple image description into a highly detailed, vivid, 8k photorealistic image generation prompt specifying lighting, artistic style, camera lens, color palette, and composition.\n"
+                    "Expand the following simple image description into a detailed image generation prompt specifying lighting, artistic style, camera lens, color palette, and composition.\n"
                     "Do NOT include conversational chatter or pleasantries. Return ONLY the final expanded prompt text.\n\n"
                     f"User Prompt: {clean_prompt or raw_prompt}\n"
                     "Expanded Prompt:"
@@ -261,7 +250,6 @@ async def generate_image(request: ImageGenRequest, db: aiosqlite.Connection = De
         except Exception as exp_err:
             logger.warning("Stage 1 prompt expansion skipped (%s). Using clean prompt.", exp_err)
 
-        # Stage 2: Synthesis with x/flux2-klein Engine
         image_url, generator_name = await generate_flux2_klein_image(enhanced_prompt)
 
         prompt_info = (
@@ -276,19 +264,19 @@ async def generate_image(request: ImageGenRequest, db: aiosqlite.Connection = De
             f"{prompt_info}"
         )
 
-    # ── Persist User Query & Assistant Response ──────────────────────────────
+    # ── Persist User Query & Assistant Response with owner_id ────────
     try:
         user_msg_id = str(uuid.uuid4())
         assistant_msg_id = str(uuid.uuid4())
         now_iso = datetime.now(timezone.utc).isoformat()
 
         await db.execute(
-            "INSERT INTO messages (id, conversation_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)",
-            (user_msg_id, request.conversation_id, "user", raw_prompt, now_iso),
+            "INSERT INTO messages (id, conversation_id, role, content, created_at, owner_id) VALUES (?, ?, ?, ?, ?, ?)",
+            (user_msg_id, request.conversation_id, "user", raw_prompt, now_iso, user_id),
         )
         await db.execute(
-            "INSERT INTO messages (id, conversation_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)",
-            (assistant_msg_id, request.conversation_id, "assistant", markdown_response, now_iso),
+            "INSERT INTO messages (id, conversation_id, role, content, created_at, owner_id) VALUES (?, ?, ?, ?, ?, ?)",
+            (assistant_msg_id, request.conversation_id, "assistant", markdown_response, now_iso, user_id),
         )
         await db.commit()
     except Exception as db_err:

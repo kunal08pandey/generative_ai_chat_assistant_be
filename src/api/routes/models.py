@@ -34,9 +34,9 @@ async def get_models(request: Request):
     is_local = is_localhost_request(request)
 
     if is_local:
-        # Dynamically query local Ollama instance on localhost
+        # Dynamically query local Ollama instance on localhost (bounded timeout to avoid blocking)
         try:
-            async with httpx.AsyncClient(timeout=3.0) as client:
+            async with httpx.AsyncClient(timeout=0.8) as client:
                 response = await client.get(f"{OLLAMA_BASE_URL}/api/tags")
                 if response.status_code == 200:
                     installed_models = []
@@ -48,13 +48,14 @@ async def get_models(request: Request):
                     if installed_models:
                         ModelRegistry.set_models("ollama", installed_models)
         except Exception as exc:
-            logger.warning("Could not discover Ollama models at %s: %s. Using default models.", OLLAMA_BASE_URL, exc)
+            logger.debug("Ollama models discovery skipped at %s: %s", OLLAMA_BASE_URL, exc)
     else:
         logger.info("Non-localhost request to /models (client: %s) — omitting Ollama models.", getattr(request.client, "host", "unknown"))
 
     models_by_provider = ModelRegistry.get_models(include_ollama=is_local)
     all_models = ModelRegistry.get_all_models(include_ollama=is_local)
     providers = ModelRegistry.get_providers(include_ollama=is_local)
+    capabilities = {model: ModelRegistry.get_capabilities(model) for model in all_models}
 
     # Groq categorized model breakdown
     groq_categorized = GroqClient.list_models_categorized()
@@ -64,6 +65,7 @@ async def get_models(request: Request):
         "models_by_provider": models_by_provider,
         "all_models": all_models,
         "providers": providers,
+        "capabilities": capabilities,
         "groq_categories": groq_categorized,
         "is_localhost": is_local,
     })

@@ -3,10 +3,11 @@ LLM Model Registry
 ===================
 
 Central registry for advertised and available LLM models.
-Supports dynamic discovery of local Ollama models and Groq cloud models.
+Supports capability awareness and dynamic discovery of local Ollama models and Groq cloud models.
 """
 from __future__ import annotations
 
+import time
 import httpx
 
 from src.settings import OLLAMA_BASE_URL
@@ -16,6 +17,10 @@ logger = get_logger(__name__)
 
 
 class ModelRegistry:
+    _last_ollama_check: float = 0.0
+    _last_groq_check: float = 0.0
+    _cache_ttl: float = 60.0
+
     _models = {
         "groq": [
             "llama-3.3-70b-versatile",
@@ -47,6 +52,7 @@ class ModelRegistry:
             "qwen2.5-coder:14b",
             "gemma4:12b",
             "x/flux2-klein",
+            "gen-labs-scout",
         ],
         "llama_cpp": [
             "local-gguf",
@@ -54,13 +60,19 @@ class ModelRegistry:
     }
 
     @classmethod
-    def refresh_ollama_models(cls) -> None:
+    def refresh_ollama_models(cls, force: bool = False) -> None:
         """
         Dynamically query local Ollama daemon to discover installed models.
+        Cached with TTL to prevent blocking hot paths (Phase 4).
         """
+        now = time.monotonic()
+        if not force and (now - cls._last_ollama_check < cls._cache_ttl):
+            return
+        cls._last_ollama_check = now
+
         url = f"{OLLAMA_BASE_URL}/api/tags"
         try:
-            with httpx.Client(timeout=3.0) as client:
+            with httpx.Client(timeout=0.8) as client:
                 res = client.get(url)
                 if res.status_code == 200:
                     data = res.json()
@@ -76,10 +88,16 @@ class ModelRegistry:
             logger.debug("Could not query Ollama models from %s: %s", url, e)
 
     @classmethod
-    def refresh_groq_models(cls) -> None:
+    def refresh_groq_models(cls, force: bool = False) -> None:
         """
         Dynamically query Groq API for available models if GROQ_API_KEY is configured.
+        Cached with TTL to avoid synchronous blocking (Phase 4).
         """
+        now = time.monotonic()
+        if not force and (now - cls._last_groq_check < cls._cache_ttl):
+            return
+        cls._last_groq_check = now
+
         try:
             from src.llm.groq_client import GroqClient
             live_models = GroqClient.list_models()
@@ -88,6 +106,39 @@ class ModelRegistry:
                 logger.info("Registered %d Groq models", len(live_models))
         except Exception as e:
             logger.debug("Could not refresh Groq models: %s", e)
+
+    @classmethod
+    def get_capabilities(cls, model_name: str) -> list[str]:
+        """
+        Return declared capabilities for a model:
+        'chat', 'vision', 'speech', 'code', 'image_generation'
+        """
+        caps = ["chat"]
+        name = (model_name or "").lower().strip()
+
+        # Vision capabilities
+        if any(v in name for v in ["gemini", "argon", "flux", "vision", "vl", "pixtral"]):
+            caps.append("vision")
+
+        # Speech capabilities
+        if any(s in name for s in ["whisper", "orpheus", "tts", "asr"]):
+            caps.append("speech")
+
+        # Code capabilities
+        if any(c in name for c in ["coder", "code", "deepseek-r1"]):
+            caps.append("code")
+
+        # Image generation capabilities
+        if any(img in name for img in ["flux", "imagen"]):
+            caps.append("image_generation")
+
+        return list(dict.fromkeys(caps))
+
+    @classmethod
+    def get_models_by_capability(cls, capability: str, include_ollama: bool = True) -> list[str]:
+        """Return all models advertising a specific capability."""
+        all_models = cls.get_all_models(include_ollama=include_ollama)
+        return [m for m in all_models if capability in cls.get_capabilities(m)]
 
     @classmethod
     def get_models(cls, provider: str | None = None, include_ollama: bool = True) -> dict | list:
@@ -137,15 +188,31 @@ class ModelRegistry:
 
     @classmethod
     def is_model_available(cls, model_name: str, include_ollama: bool = True) -> bool:
-        """Check if a specific model is non-empty and valid."""
+        """
+        Check if a model is registered and available (audit finding 49 & Phase 4).
+        Rejects arbitrary unregistered models.
+        """
         if not model_name or not model_name.strip():
             return False
-        # If ollama is disabled, check if model belongs to ollama
-        if not include_ollama:
-            provider = cls.get_provider_for_model(model_name)
-            if provider == "ollama":
-                return False
-        return True
+
+        name = model_name.strip()
+        all_models = cls.get_all_models(include_ollama=include_ollama)
+
+        # Exact match
+        if name in all_models:
+            return True
+
+        # Check provider models directly without dynamic discovery if offline
+        for prov, mlist in cls._models.items():
+            if prov == "ollama" and not include_ollama:
+                continue
+            if name in mlist:
+                return True
+            # Match without tag if user passed tag or base
+            if any(name == m.split(":")[0] or m == name.split(":")[0] for m in mlist):
+                return True
+
+        return False
 
     @classmethod
     def get_provider_for_model(cls, model_name: str) -> str:

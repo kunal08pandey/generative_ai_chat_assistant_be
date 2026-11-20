@@ -3,18 +3,28 @@ File & Document Export Endpoint
 ================================
 
 Provides endpoints to export assistant responses and code into:
-- Word documents (.docx)
-- Arbitrary code/text files (.swift, .py, .sh, .php, etc.)
+- Word documents (.docx) with safe HTML fallback and escaped metadata
+- Arbitrary code/text files (.swift, .py, .sh, etc.)
+- Excel spreadsheets (.xlsx) with formula injection protection (audit S9)
+
+Phase 1 & Phase 2 Security Improvements:
+- Requires authenticated session (`get_current_user`).
+- Escapes untrusted HTML in Word HTML fallback to prevent executable markup (audit S5).
+- Neutralizes formula injection by quoting text cells starting with [=, +, -, @] (audit S9).
 """
 from __future__ import annotations
 
+import csv
+import html
 import io
 import re
 from typing import Optional
-from fastapi import APIRouter
-from fastapi.responses import Response, StreamingResponse
-from pydantic import BaseModel
 
+from fastapi import APIRouter, Depends
+from fastapi.responses import Response, StreamingResponse
+from pydantic import BaseModel, Field
+
+from src.api.dependencies.auth import get_current_user
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -22,33 +32,75 @@ router = APIRouter(prefix="/export", tags=["Export"])
 
 
 class ExportDocxRequest(BaseModel):
-    title: str = "Document"
-    content: str
-    filename: str = "document.docx"
+    title: str = Field("Document", max_length=200)
+    content: str = Field(..., max_length=500_000)
+    filename: str = Field("document.docx", max_length=200)
 
 
 class ExportFileRequest(BaseModel):
-    filename: str
-    content: str
+    filename: str = Field(..., max_length=200)
+    content: str = Field(..., max_length=500_000)
     mime_type: Optional[str] = None
 
 
+class ExportXlsxRequest(BaseModel):
+    title: str = Field("Sheet1", max_length=100)
+    content: str = Field(..., max_length=500_000)
+    filename: str = Field("spreadsheet.xlsx", max_length=200)
+
+
+def extract_table_rows(text: str) -> list[list[str]]:
+    """Parse markdown table, CSV, or TSV into a list of row lists."""
+    rows: list[list[str]] = []
+    lines = [ln.strip() for ln in text.strip().split("\n") if ln.strip()]
+
+    # 1. Check if lines contain markdown table pipes (|)
+    has_pipe = any("|" in ln for ln in lines)
+    if has_pipe:
+        for ln in lines:
+            if re.match(r"^\|?\s*[-:]+[-|\s:]*\|?$", ln):
+                continue
+            if "|" in ln:
+                cells = [c.strip() for c in ln.strip("|").split("|")]
+                if any(cells):
+                    rows.append(cells)
+        if rows:
+            return rows
+
+    # 2. Fallback to CSV / TSV parsing
+    delimiter = "\t" if "\t" in text else ","
+    try:
+        reader = csv.reader(text.splitlines(), delimiter=delimiter)
+        for r in reader:
+            if r and any(c.strip() for c in r):
+                rows.append([c.strip() for c in r])
+    except Exception:
+        pass
+
+    return rows
+
+
 @router.post("/docx")
-async def export_docx(req: ExportDocxRequest):
+async def export_docx(
+    req: ExportDocxRequest,
+    user: dict = Depends(get_current_user),
+):
     """
     Converts markdown or text into a formatted Word (.docx) document.
     """
+    safe_filename = re.sub(r'[^a-zA-Z0-9_.-]', '_', req.filename)
+    if not safe_filename.endswith(".docx"):
+        safe_filename += ".docx"
+
     try:
         import docx
         from docx.shared import Pt, Inches, RGBColor
 
         doc = docx.Document()
 
-        # Add Title Heading
         if req.title:
             doc.add_heading(req.title, level=0)
 
-        # Parse markdown lines
         lines = req.content.split("\n")
         in_code_block = False
         code_lines: list[str] = []
@@ -58,7 +110,6 @@ async def export_docx(req: ExportDocxRequest):
 
             if stripped.startswith("```"):
                 if in_code_block:
-                    # Closing code block
                     code_text = "\n".join(code_lines)
                     p = doc.add_paragraph(code_text)
                     p.paragraph_format.left_indent = Inches(0.25)
@@ -91,7 +142,6 @@ async def export_docx(req: ExportDocxRequest):
             elif stripped:
                 doc.add_paragraph(line)
 
-        # Drain unclosed code block if any
         if in_code_block and code_lines:
             p = doc.add_paragraph("\n".join(code_lines))
             p.paragraph_format.left_indent = Inches(0.25)
@@ -103,17 +153,18 @@ async def export_docx(req: ExportDocxRequest):
         doc.save(bio)
         bio.seek(0)
 
-        filename = req.filename if req.filename.endswith(".docx") else f"{req.filename}.docx"
         return StreamingResponse(
             bio,
             media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+            headers={"Content-Disposition": f'attachment; filename="{safe_filename}"'},
         )
     except Exception as e:
-        logger.warning("python-docx conversion failed or not available (%s). Falling back to HTML .doc format.", e)
-        # Fallback to Word-compatible HTML format (.doc)
+        logger.warning("python-docx conversion failed (%s). Falling back to HTML .doc format.", e)
+        # HTML fallback with strict HTML entity escaping to prevent XSS / markup injection
+        safe_title = html.escape(req.title)
+        safe_content = html.escape(req.content)
         html_doc = f"""<html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'>
-<head><meta charset='utf-8'><title>{req.title}</title>
+<head><meta charset='utf-8'><title>{safe_title}</title>
 <style>
 body {{ font-family: Calibri, sans-serif; font-size: 11pt; line-height: 1.5; color: #1e293b; }}
 h1 {{ color: #1e3a8a; font-size: 18pt; border-bottom: 1px solid #e2e8f0; padding-bottom: 4px; }}
@@ -121,12 +172,10 @@ h2 {{ color: #2563eb; font-size: 14pt; margin-top: 16px; }}
 pre {{ background: #f8fafc; border: 1px solid #e2e8f0; padding: 10px; font-family: Consolas, monospace; font-size: 10pt; }}
 </style>
 </head><body>
-<h1>{req.title}</h1>
-<div><pre>{req.content}</pre></div>
+<h1>{safe_title}</h1>
+<div><pre>{safe_content}</pre></div>
 </body></html>"""
-        fallback_filename = req.filename.replace(".docx", ".doc")
-        if not fallback_filename.endswith(".doc"):
-            fallback_filename += ".doc"
+        fallback_filename = safe_filename.replace(".docx", ".doc")
         return Response(
             content=html_doc.encode("utf-8"),
             media_type="application/msword",
@@ -134,55 +183,22 @@ pre {{ background: #f8fafc; border: 1px solid #e2e8f0; padding: 10px; font-famil
         )
 
 
-class ExportXlsxRequest(BaseModel):
-    title: str = "Sheet1"
-    content: str
-    filename: str = "spreadsheet.xlsx"
-
-
-def extract_table_rows(text: str) -> list[list[str]]:
-    """Parse markdown table, CSV, or TSV into a list of row lists."""
-    rows: list[list[str]] = []
-    lines = [ln.strip() for ln in text.strip().split("\n") if ln.strip()]
-
-    # 1. Check if lines contain markdown table pipes (|)
-    has_pipe = any("|" in ln for ln in lines)
-    if has_pipe:
-        for ln in lines:
-            # Skip separator line like |---|---|
-            if re.match(r"^\|?\s*[-:]+[-|\s:]*\|?$", ln):
-                continue
-            if "|" in ln:
-                cells = [c.strip() for c in ln.strip("|").split("|")]
-                if any(cells):
-                    rows.append(cells)
-        if rows:
-            return rows
-
-    # 2. Fallback to CSV / TSV parsing
-    import csv
-    delimiter = "\t" if "\t" in text else ","
-    try:
-        reader = csv.reader(text.splitlines(), delimiter=delimiter)
-        for r in reader:
-            if r and any(c.strip() for c in r):
-                rows.append([c.strip() for c in r])
-    except Exception:
-        pass
-
-    return rows
-
-
 @router.post("/xlsx")
-async def export_xlsx(req: ExportXlsxRequest):
+async def export_xlsx(
+    req: ExportXlsxRequest,
+    user: dict = Depends(get_current_user),
+):
     """
     Converts markdown tables or CSV content into a real styled Excel (.xlsx) spreadsheet.
+    Protects against Formula Injection (CSV / Excel injection, audit S9).
     """
     rows = extract_table_rows(req.content)
     if not rows:
         rows = [["Item", "Details"], ["Content", req.content]]
 
-    safe_filename = req.filename if req.filename.endswith(".xlsx") else f"{req.filename}.xlsx"
+    safe_filename = re.sub(r'[^a-zA-Z0-9_.-]', '_', req.filename)
+    if not safe_filename.endswith(".xlsx"):
+        safe_filename += ".xlsx"
 
     try:
         import openpyxl
@@ -194,7 +210,6 @@ async def export_xlsx(req: ExportXlsxRequest):
         clean_title = re.sub(r'[\/\\*?:\[\]]', '_', req.title)[:30] or "Sheet1"
         ws.title = clean_title
 
-        # Excel Theme Colors: Emerald Green Header with Clean Borders
         header_fill = PatternFill(start_color="107C41", end_color="107C41", fill_type="solid")
         header_font = Font(name="Segoe UI", size=11, bold=True, color="FFFFFF")
         zebra_fill = PatternFill(start_color="F8FAFC", end_color="F8FAFB", fill_type="solid")
@@ -233,7 +248,13 @@ async def export_xlsx(req: ExportXlsxRequest):
                 if num_val is not None:
                     cell.value = num_val
                 else:
-                    cell.value = clean_str
+                    # ── Formula Injection Protection (audit S9) ─────────
+                    # Neutralize formulas starting with =, +, -, @, \t, \r
+                    # by prefixing with a single quote (') so Excel treats it as plain text.
+                    if clean_str.startswith(("=", "+", "-", "@", "\t", "\r")):
+                        cell.value = f"'{clean_str}"
+                    else:
+                        cell.value = clean_str
 
                 cell.border = thin_border
 
@@ -271,14 +292,14 @@ async def export_xlsx(req: ExportXlsxRequest):
             headers={"Content-Disposition": f'attachment; filename="{safe_filename}"'},
         )
     except Exception as e:
-        logger.warning("openpyxl export failed (%s). Falling back to CSV with UTF-8 BOM.", e)
-        import csv
+        logger.warning("openpyxl export failed (%s). Falling back to CSV.", e)
         csv_buffer = io.StringIO()
         writer = csv.writer(csv_buffer)
         for r in rows:
-            writer.writerow(r)
+            # Formula injection protection in CSV fallback
+            safe_r = [f"'{c}" if str(c).startswith(("=", "+", "-", "@")) else c for c in r]
+            writer.writerow(safe_r)
 
-        # UTF-8 BOM for Microsoft Excel compatibility
         content_bytes = b"\xef\xbb\xbf" + csv_buffer.getvalue().encode("utf-8")
         csv_filename = safe_filename.replace(".xlsx", ".csv")
         return Response(
@@ -289,15 +310,17 @@ async def export_xlsx(req: ExportXlsxRequest):
 
 
 @router.post("/file")
-async def export_file(req: ExportFileRequest):
+async def export_file(
+    req: ExportFileRequest,
+    user: dict = Depends(get_current_user),
+):
     """
-    Downloads any arbitrary code or text file (.swift, .py, .sh, .php, etc.).
+    Downloads any arbitrary code or text file (.swift, .py, .sh, etc.).
     """
-    safe_filename = req.filename or "generated_file.txt"
+    safe_filename = re.sub(r'[^a-zA-Z0-9_.-]', '_', req.filename) or "generated_file.txt"
     media_type = req.mime_type or "application/octet-stream"
     return Response(
         content=req.content.encode("utf-8"),
         media_type=media_type,
         headers={"Content-Disposition": f'attachment; filename="{safe_filename}"'},
     )
-

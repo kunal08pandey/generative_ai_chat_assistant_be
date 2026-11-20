@@ -8,7 +8,8 @@ Supports:
   • Standard text chat with few-shot prompt formatting.
   • Vision models (base64-encoded images).
   • SSE streaming with a ``done`` event on completion.
-  • Reliable assistant-message persistence (no DB connection leak).
+  • Reliable assistant-message persistence.
+  • Owner-scoped conversation access control (Phase 1).
 """
 from __future__ import annotations
 
@@ -21,6 +22,7 @@ import aiosqlite
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
+from src.api.dependencies.auth import get_current_user
 from src.api.schemas import ChatRequest
 from src.db.database import get_db, get_db_path
 from src.llm.client_factory import get_llm_client
@@ -36,27 +38,36 @@ router = APIRouter()
 
 
 @router.post("/", dependencies=[Depends(RateLimiter(max_requests=120, window_seconds=60))])
-async def chat(request: ChatRequest, http_request: Request, db: aiosqlite.Connection = Depends(get_db)):
+async def chat(
+    request: ChatRequest,
+    http_request: Request,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
     """
     Stream a chat response from the selected LLM.
-
-    The user message is saved immediately. The complete assistant response
-    is saved *after* the stream finishes using a dedicated DB connection
-    scoped to the generator's ``finally`` block.
+    Strictly scoped to the authenticated owner's conversation.
     """
+    user_id = user["id"]
     logger.info(
-        "Chat request — conv=%s model=%s images=%d",
+        "Chat request — conv=%s user=%s model=%s images=%d",
         request.conversation_id,
+        user_id,
         request.model,
         len(request.images) if request.images else 0,
     )
 
+    # ── Verify conversation exists and belongs to current user ────────
     cursor = await db.execute(
-        "SELECT id FROM conversations WHERE id = ?",
+        "SELECT id, owner_id FROM conversations WHERE id = ?",
         (request.conversation_id,),
     )
-    if not await cursor.fetchone():
+    conv_row = await cursor.fetchone()
+    if not conv_row:
         raise HTTPException(status_code=404, detail="Conversation not found")
+    if conv_row["owner_id"] and conv_row["owner_id"] != user_id:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
     if not ModelRegistry.is_model_available(request.model):
         raise HTTPException(status_code=400, detail=f"Unsupported model: {request.model}")
 
@@ -85,14 +96,11 @@ async def chat(request: ChatRequest, http_request: Request, db: aiosqlite.Connec
         "show me an image", "draw ", "create image", "paint ",
     ])
 
-    # Route image generation requests:
-    # If Gemini model is selected → generates with Gemini (Flash or Flash-Lite)
-    # If non-Gemini model is selected → generates with x/flux2-klein
     if is_flux_model or is_image_prompt:
         from src.api.routes.image import generate_image, ImageGenRequest
         active_img_model = request.model if is_gemini_model else "x/flux2-klein"
         img_req = ImageGenRequest(prompt=request.query, model=active_img_model, conversation_id=request.conversation_id)
-        img_res = await generate_image(img_req, db)
+        img_res = await generate_image(img_req, user=user, db=db)
         content = img_res["data"]["content"]
 
         if is_gemini_model:
@@ -129,12 +137,12 @@ async def chat(request: ChatRequest, http_request: Request, db: aiosqlite.Connec
             )
             now_iso = datetime.now(timezone.utc).isoformat()
             await db.execute(
-                "INSERT INTO messages (id, conversation_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)",
-                (str(uuid.uuid4()), request.conversation_id, "user", request.query.strip(), now_iso),
+                "INSERT INTO messages (id, conversation_id, role, content, created_at, owner_id) VALUES (?, ?, ?, ?, ?, ?)",
+                (str(uuid.uuid4()), request.conversation_id, "user", request.query.strip(), now_iso, user_id),
             )
             await db.execute(
-                "INSERT INTO messages (id, conversation_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)",
-                (str(uuid.uuid4()), request.conversation_id, "assistant", matched_route.response, now_iso),
+                "INSERT INTO messages (id, conversation_id, role, content, created_at, owner_id) VALUES (?, ?, ?, ?, ?, ?)",
+                (str(uuid.uuid4()), request.conversation_id, "assistant", matched_route.response, now_iso, user_id),
             )
             await db.commit()
 
@@ -164,24 +172,24 @@ async def chat(request: ChatRequest, http_request: Request, db: aiosqlite.Connec
         (request.conversation_id,),
     )
     past_rows = await cursor.fetchall()
-    
-    # Format past turns (excluding current message) into conversation history string
+
     history_lines = []
     for role, content in past_rows[-10:]:
         role_label = "User" if role == "user" else "Assistant"
         history_lines.append(f"{role_label}: {content}")
     history_text = "\n".join(history_lines)
 
-    # ── Save user message ────────────────────────────────────────────────
+    # ── Save user message with owner_id ──────────────────────────────────
     stored_query = request.query.strip() or f"[Sent {len(request.images or [])} image(s)]"
     await db.execute(
-        "INSERT INTO messages (id, conversation_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO messages (id, conversation_id, role, content, created_at, owner_id) VALUES (?, ?, ?, ?, ?, ?)",
         (
             str(uuid.uuid4()),
             request.conversation_id,
             "user",
             stored_query,
             datetime.now(timezone.utc).isoformat(),
+            user_id,
         ),
     )
     await db.commit()
@@ -217,15 +225,9 @@ async def chat(request: ChatRequest, http_request: Request, db: aiosqlite.Connec
     db_path = get_db_path()
 
     async def stream_and_save():
-        """Generator that streams SSE tokens and saves the full response.
-        
-        Emits a 'thinking' event before tokens start so the frontend
-        can display a Gemini-style "Thinking…" indicator.
-        """
         full_response: list[str] = []
         save_db: aiosqlite.Connection | None = None
         try:
-            # Send a thinking event so frontend shows collapsible thinking indicator
             yield f"data: {json.dumps({'thinking': True, 'model': request.model, 'provider': provider})}\n\n"
 
             async for token in client.generate_stream(prompt, images=request.images):
@@ -240,7 +242,6 @@ async def chat(request: ChatRequest, http_request: Request, db: aiosqlite.Connec
             yield f"data: {json.dumps({'error': error_payload})}\n\n"
             return
         finally:
-            # ── Persist assistant response ───────────────────────────────
             complete_text = "".join(full_response)
             if complete_text:
                 try:
@@ -248,13 +249,14 @@ async def chat(request: ChatRequest, http_request: Request, db: aiosqlite.Connec
                     await save_db.execute("PRAGMA journal_mode=WAL")
                     await save_db.execute("PRAGMA foreign_keys=ON")
                     await save_db.execute(
-                        "INSERT INTO messages (id, conversation_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)",
+                        "INSERT INTO messages (id, conversation_id, role, content, created_at, owner_id) VALUES (?, ?, ?, ?, ?, ?)",
                         (
                             str(uuid.uuid4()),
                             conv_id,
                             "assistant",
                             complete_text,
                             datetime.now(timezone.utc).isoformat(),
+                            user_id,
                         ),
                     )
                     await save_db.commit()

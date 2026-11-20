@@ -117,9 +117,9 @@ def test_models_endpoint_on_remote_client(client: TestClient):
     assert data["is_localhost"] is False
 
 
-def test_chat_rejects_ollama_for_remote_client(client: TestClient, conversation):
+def test_chat_rejects_ollama_for_remote_client(auth_client: TestClient, conversation):
     """Remote requests attempting to call Ollama via /chat/ are forbidden (403)."""
-    res = client.post(
+    res = auth_client.post(
         "/chat/",
         headers={"X-Forwarded-For": "203.0.113.195"},
         json={
@@ -135,9 +135,9 @@ def test_chat_rejects_ollama_for_remote_client(client: TestClient, conversation)
     assert "Ollama models are only available on localhost" in err_msg
 
 
-def test_rag_rejects_ollama_for_remote_client(client: TestClient, conversation):
+def test_rag_rejects_ollama_for_remote_client(auth_client: TestClient, conversation):
     """Remote requests attempting to call Ollama via /rag/ are forbidden (403)."""
-    res = client.post(
+    res = auth_client.post(
         "/rag/",
         headers={"X-Forwarded-For": "203.0.113.195"},
         json={

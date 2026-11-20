@@ -83,9 +83,9 @@ def test_custom_route_registration():
     asyncio.run(run())
 
 
-def test_chat_route_integration(client, conversation):
+def test_chat_route_integration(auth_client, conversation):
     """Verify that chatting with an identity question bypasses LLM and returns deterministic response."""
-    response = client.post(
+    response = auth_client.post(
         "/chat/",
         json={
             "query": "Who developed this platform?",
@@ -97,6 +97,6 @@ def test_chat_route_integration(client, conversation):
     assert IDENTITY_DETERMINISTIC_RESPONSE in response.text
 
     # Check that assistant message was saved to history
-    history = client.get(f"/messages/{conversation['id']}").json()["data"]
+    history = auth_client.get(f"/messages/{conversation['id']}").json()["data"]
     assert history[-1]["role"] == "assistant"
     assert history[-1]["content"] == IDENTITY_DETERMINISTIC_RESPONSE

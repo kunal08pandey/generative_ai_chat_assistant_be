@@ -3,7 +3,7 @@ Generative AI API Main Entrypoint
 =================================
 
 Bootstraps the FastAPI application, registers routes, sets up global middleware,
-configures logging, and initialises database connections.
+configures logging, applies browser security headers, and initialises database connections.
 """
 import time
 from contextlib import asynccontextmanager
@@ -12,9 +12,12 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from src.api.routes import (
+    agent,
+    audio,
     auth,
     chat,
     conversations,
+    documents,
     export,
     health,
     image,
@@ -44,7 +47,7 @@ async def lifespan(app: FastAPI):
     logger.info("==================================================")
     logger.info("   Starting Generative AI Assistant Backend v1.0   ")
     logger.info("==================================================")
-    
+
     # Initialize the SQLite tables and indexes
     try:
         init_db()
@@ -74,16 +77,15 @@ setup_exception_handlers(app)
 
 # ── 4. Global Middleware ───────────────────────────────────────────────────
 @app.middleware("http")
-async def log_requests(request: Request, call_next):
+async def security_and_logging_middleware(request: Request, call_next):
     """
     HTTP middleware to:
-      • Intercept incoming requests.
-      • Inject or generate a request/correlation ID context.
+      • Inject or generate request ID context.
       • Time execution latency.
       • Log request details.
       • Attach X-Request-ID response header.
+      • Enforce standard browser security headers (audit S12).
     """
-    # Try getting custom header or generate a new one
     request_id = request.headers.get("X-Request-ID")
     request_id = set_request_id(request_id)
 
@@ -92,15 +94,23 @@ async def log_requests(request: Request, call_next):
         response = await call_next(request)
     except Exception as e:
         logger.error(
-            "Request failed: %s %s | Request ID: %s", 
-            request.method, request.url.path, request_id, 
+            "Request failed: %s %s | Request ID: %s",
+            request.method, request.url.path, request_id,
             exc_info=e
         )
         raise e
-    
+
     latency_ms = (time.monotonic() - start_time) * 1000
-    
-    # Log request line with correlation metadata
+
+    # Attach correlation header
+    response.headers["X-Request-ID"] = request_id
+
+    # ── Browser Security Headers (Phase 2 & audit S12) ─────────────────
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+
     logger.info(
         "%s %s - Status: %d - Latency: %.2fms | Request ID: %s",
         request.method,
@@ -109,17 +119,15 @@ async def log_requests(request: Request, call_next):
         latency_ms,
         request_id,
     )
-    
-    # Attach correlation header to client response
-    response.headers["X-Request-ID"] = request_id
+
     return response
 
 
-# Configure Cross-Origin Resource Sharing
+# Configure Cross-Origin Resource Sharing (with credentials enabled for HttpOnly session cookies)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins(),
-    allow_credentials=False,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=["X-Request-ID"],
@@ -131,9 +139,12 @@ app.include_router(auth.router, prefix="/auth")
 app.include_router(health.router)
 app.include_router(chat.router, prefix="/chat")
 app.include_router(rag.router, prefix="/rag")
+app.include_router(agent.router)
 app.include_router(image.router)
 app.include_router(models.router)
 app.include_router(upload.router)
+app.include_router(audio.router)
+app.include_router(documents.router)
 app.include_router(conversations.router)
 app.include_router(messages.router)
 app.include_router(logs.router)

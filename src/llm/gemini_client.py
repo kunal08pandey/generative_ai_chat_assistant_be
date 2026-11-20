@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 import base64
 import os
@@ -5,8 +7,12 @@ from pathlib import Path
 from typing import AsyncIterator
 
 from dotenv import load_dotenv
-from google import genai
-from google.genai import types
+try:
+    from google import genai
+    from google.genai import types
+except ImportError:
+    genai = None
+    types = None
 
 from src.llm.base import BaseLLM
 from src.utils.logger import get_logger
@@ -63,7 +69,7 @@ class GeminiClient(BaseLLM):
             self.model,
             self.model_name,
         )
-        self.client = genai.Client(api_key=api_key)
+        self.client = genai.Client(api_key=api_key) if genai else None
 
     def _prepare_contents(self, prompt: str, images: list[str] | None = None) -> list:
         """Format text prompt and optional base64 vision images into Google GenAI content parts."""

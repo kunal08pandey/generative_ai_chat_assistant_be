@@ -51,18 +51,17 @@ async def health_check(db: aiosqlite.Connection = Depends(get_db)):
         services.append(ServiceStatus(name="sqlite", status="error", message=str(e)))
         overall = "degraded"
 
-    # ── Ollama check ─────────────────────────────────────────────────────
+    # ── Ollama check (Optional local service - does not degrade cloud health) ─
     try:
         t0 = time.monotonic()
-        async with httpx.AsyncClient(timeout=3.0) as client:
+        async with httpx.AsyncClient(timeout=0.8) as client:
             response = await client.get(f"{OLLAMA_BASE_URL}/api/tags")
             response.raise_for_status()
         latency = round((time.monotonic() - t0) * 1000, 2)
         services.append(ServiceStatus(name="ollama", status="ok", latency_ms=latency))
     except Exception as e:
-        logger.warning("Health check: Ollama probe failed — %s", e)
-        services.append(ServiceStatus(name="ollama", status="error", message=str(e)))
-        overall = "degraded"
+        logger.debug("Health check: Ollama local probe unavailable — %s", e)
+        services.append(ServiceStatus(name="ollama", status="unavailable", message="Local provider offline (optional)"))
 
     # ── Persistent vector store check ────────────────────────────────────
     try:

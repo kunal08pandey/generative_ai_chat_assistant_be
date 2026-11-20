@@ -1,8 +1,21 @@
 import pytest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 
-def test_generate_image_with_gemini_flash_selected(client, conversation, monkeypatch):
+def test_generate_image_unauthenticated_rejected(client, conversation):
+    """Verify unauthenticated image generation requests return 401."""
+    response = client.post(
+        "/generate-image",
+        json={
+            "prompt": "A serene mountain lake at sunrise",
+            "model": "gemini-3.5-flash",
+            "conversation_id": conversation["id"],
+        },
+    )
+    assert response.status_code == 401
+
+
+def test_generate_image_with_gemini_flash_selected(auth_client, conversation, monkeypatch):
     """When Gemini Flash is selected, image generation must use Gemini Flash."""
     fake_gemini_gen = AsyncMock(return_value=(
         "https://image.pollinations.ai/prompt/test_flash?width=1024&height=1024",
@@ -11,7 +24,7 @@ def test_generate_image_with_gemini_flash_selected(client, conversation, monkeyp
     ))
     monkeypatch.setattr("src.api.routes.image.generate_gemini_image", fake_gemini_gen)
 
-    response = client.post(
+    response = auth_client.post(
         "/generate-image",
         json={
             "prompt": "A serene mountain lake at sunrise",
@@ -23,11 +36,10 @@ def test_generate_image_with_gemini_flash_selected(client, conversation, monkeyp
     data = response.json()["data"]
     assert data["generator"] == "Gemini Flash"
     assert "Gemini Flash" in data["content"]
-    assert "Gemini Scene Synthesis" in data["content"]
     fake_gemini_gen.assert_awaited_once()
 
 
-def test_generate_image_with_gemini_flash_lite_selected(client, conversation, monkeypatch):
+def test_generate_image_with_gemini_flash_lite_selected(auth_client, conversation, monkeypatch):
     """When Gemini Flash-Lite is selected, image generation must use Gemini Flash-Lite."""
     fake_gemini_gen = AsyncMock(return_value=(
         "https://image.pollinations.ai/prompt/test_lite?width=1024&height=1024",
@@ -36,7 +48,7 @@ def test_generate_image_with_gemini_flash_lite_selected(client, conversation, mo
     ))
     monkeypatch.setattr("src.api.routes.image.generate_gemini_image", fake_gemini_gen)
 
-    response = client.post(
+    response = auth_client.post(
         "/generate-image",
         json={
             "prompt": "A quiet forest clearing with morning mist",
@@ -51,12 +63,12 @@ def test_generate_image_with_gemini_flash_lite_selected(client, conversation, mo
     fake_gemini_gen.assert_awaited_once()
 
 
-def test_generate_image_with_non_gemini_selected(client, conversation, monkeypatch):
-    """When Gemini is NOT selected (e.g. gemma4 or local model), image generation must use x/flux2-klein."""
+def test_generate_image_with_non_gemini_selected(auth_client, conversation, monkeypatch):
+    """When Gemini is NOT selected, image generation must use x/flux2-klein."""
     fake_flux_gen = AsyncMock(return_value=("https://image.pollinations.ai/prompt/test?model=flux", "x/flux2-klein"))
     monkeypatch.setattr("src.api.routes.image.generate_flux2_klein_image", fake_flux_gen)
 
-    response = client.post(
+    response = auth_client.post(
         "/generate-image",
         json={
             "prompt": "A cyberpunk street with neon signs",
@@ -71,12 +83,12 @@ def test_generate_image_with_non_gemini_selected(client, conversation, monkeypat
     fake_flux_gen.assert_awaited_once()
 
 
-def test_generate_image_with_flux_selected(client, conversation, monkeypatch):
+def test_generate_image_with_flux_selected(auth_client, conversation, monkeypatch):
     """When x/flux2-klein is explicitly selected, image generation must use x/flux2-klein."""
     fake_flux_gen = AsyncMock(return_value=("data:image/png;base64,fakefluxb64", "x/flux2-klein"))
     monkeypatch.setattr("src.api.routes.image.generate_flux2_klein_image", fake_flux_gen)
 
-    response = client.post(
+    response = auth_client.post(
         "/generate-image",
         json={
             "prompt": "A cozy cottage in autumn",
@@ -91,7 +103,20 @@ def test_generate_image_with_flux_selected(client, conversation, monkeypatch):
     fake_flux_gen.assert_awaited_once()
 
 
-def test_chat_stream_routes_image_prompt_to_gemini_flash(client, conversation, monkeypatch):
+def test_generate_image_rejects_other_user_conversation(bob_client, conversation):
+    """User Bob cannot generate images into Alice's conversation."""
+    response = bob_client.post(
+        "/generate-image",
+        json={
+            "prompt": "Malicious prompt",
+            "model": "x/flux2-klein",
+            "conversation_id": conversation["id"],
+        },
+    )
+    assert response.status_code == 404
+
+
+def test_chat_stream_routes_image_prompt_to_gemini_flash(auth_client, conversation, monkeypatch):
     """When Gemini Flash is selected, /chat with an image prompt routes to Gemini Flash."""
     fake_gemini_gen = AsyncMock(return_value=(
         "https://image.pollinations.ai/prompt/test_flash?width=1024&height=1024",
@@ -100,7 +125,7 @@ def test_chat_stream_routes_image_prompt_to_gemini_flash(client, conversation, m
     ))
     monkeypatch.setattr("src.api.routes.image.generate_gemini_image", fake_gemini_gen)
 
-    response = client.post(
+    response = auth_client.post(
         "/chat/",
         json={
             "query": "Generate an image of a golden retriever puppy playing",
@@ -113,7 +138,7 @@ def test_chat_stream_routes_image_prompt_to_gemini_flash(client, conversation, m
     fake_gemini_gen.assert_awaited_once()
 
 
-def test_chat_stream_routes_image_prompt_to_gemini_flash_lite(client, conversation, monkeypatch):
+def test_chat_stream_routes_image_prompt_to_gemini_flash_lite(auth_client, conversation, monkeypatch):
     """When Gemini Flash-Lite is selected, /chat with an image prompt routes to Gemini Flash-Lite."""
     fake_gemini_gen = AsyncMock(return_value=(
         "https://image.pollinations.ai/prompt/test_lite?width=1024&height=1024",
@@ -122,7 +147,7 @@ def test_chat_stream_routes_image_prompt_to_gemini_flash_lite(client, conversati
     ))
     monkeypatch.setattr("src.api.routes.image.generate_gemini_image", fake_gemini_gen)
 
-    response = client.post(
+    response = auth_client.post(
         "/chat/",
         json={
             "query": "Generate an image of a golden retriever puppy playing",
@@ -135,12 +160,12 @@ def test_chat_stream_routes_image_prompt_to_gemini_flash_lite(client, conversati
     fake_gemini_gen.assert_awaited_once()
 
 
-def test_chat_stream_routes_image_prompt_to_flux_when_non_gemini_selected(client, conversation, monkeypatch):
+def test_chat_stream_routes_image_prompt_to_flux_when_non_gemini_selected(auth_client, conversation, monkeypatch):
     """When Gemini is NOT selected, /chat with an image prompt routes to x/flux2-klein."""
     fake_flux_gen = AsyncMock(return_value=("https://image.pollinations.ai/prompt/test?model=flux", "x/flux2-klein"))
     monkeypatch.setattr("src.api.routes.image.generate_flux2_klein_image", fake_flux_gen)
 
-    response = client.post(
+    response = auth_client.post(
         "/chat/",
         json={
             "query": "Create an image of an astronaut on Mars",

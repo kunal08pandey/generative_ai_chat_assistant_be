@@ -79,25 +79,34 @@ class GroqClient(BaseLLM):
         Resolve the GROQ_API_KEY from parameter, environment, or .env files.
         """
         if explicit_key and explicit_key.strip():
-            return explicit_key.strip()
+            return explicit_key.strip().strip("'\"")
 
         # Check existing environment variable
         env_key = os.environ.get("GROQ_API_KEY")
         if env_key and env_key.strip():
-            return env_key.strip()
+            return env_key.strip().strip("'\"")
 
-        # Search parent candidate paths for .env
+        # Search candidate paths for .env
         backend_dir = Path(__file__).resolve().parent.parent.parent
         candidates = [
             backend_dir / ".env",
             backend_dir.parent / ".env",
+            Path.cwd() / ".env",
+            Path.cwd() / "backend" / ".env",
+            Path("/app/.env"),
         ]
+        seen = set()
         for path in candidates:
-            if path.is_file():
+            try:
+                resolved = path.resolve()
+            except Exception:
+                resolved = path
+            if resolved not in seen and path.is_file():
+                seen.add(resolved)
                 load_dotenv(path, override=True)
                 key = os.environ.get("GROQ_API_KEY")
                 if key and key.strip():
-                    return key.strip()
+                    return key.strip().strip("'\"")
 
         return ""
 
@@ -155,6 +164,72 @@ class GroqClient(BaseLLM):
             categorized["Other"] = unassigned
 
         return categorized
+
+    @classmethod
+    async def transcribe_audio(
+        cls,
+        audio_bytes: bytes,
+        filename: str = "audio.webm",
+        content_type: str = "audio/webm",
+        model: str = "whisper-large-v3-turbo",
+        api_key: Optional[str] = None,
+        language: Optional[str] = None,
+        prompt: Optional[str] = None,
+    ) -> str:
+        """
+        Transcribe audio using Groq's high-speed Whisper models.
+        """
+        key = cls.get_api_key(api_key)
+        if not key:
+            raise ValueError(
+                "No Groq API key found. Please set GROQ_API_KEY in your backend/.env "
+                "or environment variables to transcribe audio."
+            )
+
+        url = f"{cls.GROQ_BASE_URL}/audio/transcriptions"
+        headers = {"Authorization": f"Bearer {key}"}
+
+        clean_ext = filename.split(".")[-1].lower() if "." in filename else "webm"
+        if clean_ext not in ["mp3", "mp4", "mpeg", "mpga", "m4a", "wav", "webm", "ogg"]:
+            filename = f"audio.{clean_ext}"
+
+        files = {
+            "file": (filename, audio_bytes, content_type or "audio/webm")
+        }
+        data = {
+            "model": model,
+            "response_format": "json",
+        }
+        if language:
+            data["language"] = language
+        if prompt:
+            data["prompt"] = prompt
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            try:
+                res = await client.post(url, headers=headers, files=files, data=data)
+            except Exception as exc:
+                logger.error("Groq Whisper API request failed: %s", exc)
+                raise exc
+
+            if res.status_code != 200:
+                if model != "whisper-large-v3" and res.status_code in (400, 404):
+                    logger.warning("Retrying transcription with whisper-large-v3...")
+                    data["model"] = "whisper-large-v3"
+                    files = {"file": (filename, audio_bytes, content_type or "audio/webm")}
+                    res = await client.post(url, headers=headers, files=files, data=data)
+
+                if res.status_code != 200:
+                    err_msg = res.text
+                    try:
+                        err_json = res.json()
+                        err_msg = err_json.get("error", {}).get("message", res.text)
+                    except Exception:
+                        pass
+                    raise RuntimeError(f"Groq Whisper transcription failed ({res.status_code}): {err_msg}")
+
+            payload = res.json()
+            return payload.get("text", "").strip()
 
     def __init__(self, model: str, api_key: Optional[str] = None):
         """

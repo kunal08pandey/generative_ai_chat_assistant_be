@@ -6,9 +6,9 @@ RAG Endpoint
 
 Features:
   • Multi-step RAG chain: Query Check -> Context Retrieval -> Answer Generation.
-  • Bypasses LLM query optimization for short queries (< 150 chars), saving a full
-    blocking LLM call and decreasing initial response latency by 3-10 seconds locally.
-  • Proper resources cleanup in the streaming finally block (prevents DB lockups).
+  • Scoped strictly to authenticated owner's conversation and private document store (Phase 1).
+  • Bypasses LLM query optimization for short queries (< 150 chars).
+  • Proper resource cleanup in the streaming finally block.
 """
 import json
 import uuid
@@ -18,6 +18,7 @@ import aiosqlite
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
+from src.api.dependencies.auth import get_current_user
 from src.api.schemas import RagRequest
 from src.db.database import get_db, get_db_path
 from src.llm.client_factory import get_llm_client
@@ -35,20 +36,35 @@ router = APIRouter(tags=["chat", "rag"])
 
 
 @router.post("/", dependencies=[Depends(RateLimiter(max_requests=120, window_seconds=60))])
-async def rag(request: RagRequest, http_request: Request, db: aiosqlite.Connection = Depends(get_db)):
+async def rag(
+    request: RagRequest,
+    http_request: Request,
+    user: dict = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+):
     """
     Execute a RAG query and stream status updates and final answer tokens.
-
-    Saves the user query immediately, then retrieves documents, formats
-    the prompt, streams answer tokens via SSE, and persists the complete
-    response in database afterward.
+    Scoped strictly to the authenticated user's conversations and indexed documents.
     """
+    user_id = user["id"]
     logger.info(
-        "RAG request — conv=%s model=%s provider=%s",
+        "RAG request — conv=%s user=%s model=%s provider=%s",
         request.conversation_id,
+        user_id,
         request.model,
         request.provider,
     )
+
+    # ── Verify conversation exists and belongs to current user ────────
+    cursor = await db.execute(
+        "SELECT id, owner_id FROM conversations WHERE id = ?",
+        (request.conversation_id,),
+    )
+    conv_row = await cursor.fetchone()
+    if not conv_row:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    if conv_row["owner_id"] and conv_row["owner_id"] != user_id:
+        raise HTTPException(status_code=404, detail="Conversation not found")
 
     provider = request.provider or ModelRegistry.get_provider_for_model(request.model) or "ollama"
     if provider == "ollama" and not is_localhost_request(http_request):
@@ -70,12 +86,12 @@ async def rag(request: RagRequest, http_request: Request, db: aiosqlite.Connecti
         )
         now_iso = datetime.now(timezone.utc).isoformat()
         await db.execute(
-            "INSERT INTO messages (id, conversation_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)",
-            (str(uuid.uuid4()), request.conversation_id, "user", request.query.strip(), now_iso),
+            "INSERT INTO messages (id, conversation_id, role, content, created_at, owner_id) VALUES (?, ?, ?, ?, ?, ?)",
+            (str(uuid.uuid4()), request.conversation_id, "user", request.query.strip(), now_iso, user_id),
         )
         await db.execute(
-            "INSERT INTO messages (id, conversation_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)",
-            (str(uuid.uuid4()), request.conversation_id, "assistant", matched_route.response, now_iso),
+            "INSERT INTO messages (id, conversation_id, role, content, created_at, owner_id) VALUES (?, ?, ?, ?, ?, ?)",
+            (str(uuid.uuid4()), request.conversation_id, "assistant", matched_route.response, now_iso, user_id),
         )
         await db.commit()
 
@@ -100,8 +116,7 @@ async def rag(request: RagRequest, http_request: Request, db: aiosqlite.Connecti
         (request.conversation_id,),
     )
     past_rows = await cursor.fetchall()
-    
-    # Format past turns (excluding current message) into conversation history string
+
     history_lines = []
     for role, content in past_rows[-10:]:
         role_label = "User" if role == "user" else "Assistant"
@@ -111,13 +126,14 @@ async def rag(request: RagRequest, http_request: Request, db: aiosqlite.Connecti
     # ── Save User Message ────────────────────────────────────────────────
     stored_query = request.query.strip() or "[Analyzed document]"
     await db.execute(
-        "INSERT INTO messages (id, conversation_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO messages (id, conversation_id, role, content, created_at, owner_id) VALUES (?, ?, ?, ?, ?, ?)",
         (
             str(uuid.uuid4()),
             request.conversation_id,
             "user",
             stored_query,
             datetime.now(timezone.utc).isoformat(),
+            user_id,
         ),
     )
     await db.commit()
@@ -132,9 +148,6 @@ async def rag(request: RagRequest, http_request: Request, db: aiosqlite.Connecti
     db_path = get_db_path()
 
     async def stream_rag():
-        """
-        Streams processing status events followed by the LLM answer tokens.
-        """
         full_response = []
         save_db = None
         try:
@@ -156,16 +169,19 @@ async def rag(request: RagRequest, http_request: Request, db: aiosqlite.Connecti
                 optimized_query = await optimizer_chain.run(query=query)
                 logger.debug("Optimized Query: %s", optimized_query)
 
-            # Step 2: Retrieve context (Enrich search query with recent history topic)
+            # Step 2: Retrieve context (scoped strictly to user_id)
             yield f"data: {json.dumps({'status': 'Searching documents...'})}\n\n"
-            logger.info("Retrieving context from vector store for RAG")
+            logger.info("Retrieving context from vector store for user=%s", user_id)
 
             search_query = optimized_query
             if history_text:
-                # Combine recent conversation context with query for high vector recall
                 search_query = f"{history_text[-250:]} {optimized_query}"
 
-            context = await retrieve_context(search_query)
+            # Document isolation: ONLY retrieve documents belonging to this owner
+            context = await retrieve_context(search_query, owner_id=user_id)
+            citations = getattr(context, "citations", [])
+            if citations:
+                yield f"data: {json.dumps({'citations': citations})}\n\n"
 
             # Step 3: Stream final answer
             yield f"data: {json.dumps({'status': 'Generating answer...'})}\n\n"
@@ -175,7 +191,8 @@ async def rag(request: RagRequest, http_request: Request, db: aiosqlite.Connecti
                 rag_prompt = (
                     "You are a helpful, expert AI assistant engaged in an ongoing conversation.\n"
                     "Use the Document Context and Conversation History below to accurately answer the user's latest request.\n"
-                    "Maintain full context from previous turns (such as medical reports, diet requests, or prior instructions) and answer directly in the user's requested language/tone (e.g. Hinglish).\n\n"
+                    "When referencing facts from the Document Context, cite sources clearly using references like [1], [2] matching the numbered sources.\n"
+                    "Maintain full context from previous turns and answer directly in the user's requested language/tone.\n\n"
                     f"=== Document Context ===\n{context or 'No specific document snippet matched. Use conversation history.'}\n\n"
                     f"=== Conversation History ===\n{history_text}\n\n"
                     f"User: {query}\nAssistant:"
@@ -183,7 +200,8 @@ async def rag(request: RagRequest, http_request: Request, db: aiosqlite.Connecti
             else:
                 rag_prompt = (
                     "You are a helpful, expert AI assistant.\n"
-                    "Answer the user's request based on the provided document context.\n\n"
+                    "Answer the user's request based on the provided document context.\n"
+                    "When referencing facts from the Document Context, cite sources clearly using references like [1], [2] matching the numbered sources.\n\n"
                     f"=== Document Context ===\n{context or 'No document snippet found.'}\n\n"
                     f"User: {query}\nAssistant:"
                 )
@@ -200,20 +218,21 @@ async def rag(request: RagRequest, http_request: Request, db: aiosqlite.Connecti
             yield f"data: {json.dumps({'error': error_payload})}\n\n"
             return
         finally:
-            # ── Save Complete Assistant Message ───────────────────────────
             complete_text = "".join(full_response)
             if complete_text:
                 try:
                     save_db = await aiosqlite.connect(db_path, timeout=20.0)
                     await save_db.execute("PRAGMA journal_mode=WAL")
+                    await save_db.execute("PRAGMA foreign_keys=ON")
                     await save_db.execute(
-                        "INSERT INTO messages (id, conversation_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)",
+                        "INSERT INTO messages (id, conversation_id, role, content, created_at, owner_id) VALUES (?, ?, ?, ?, ?, ?)",
                         (
                             str(uuid.uuid4()),
                             conv_id,
                             "assistant",
                             complete_text,
                             datetime.now(timezone.utc).isoformat(),
+                            user_id,
                         ),
                     )
                     await save_db.commit()

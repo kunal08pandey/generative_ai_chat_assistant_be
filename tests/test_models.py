@@ -2,6 +2,8 @@ from src.llm.registry import ModelRegistry
 
 
 class FakeResponse:
+    status_code = 200
+
     def raise_for_status(self):
         return None
 
