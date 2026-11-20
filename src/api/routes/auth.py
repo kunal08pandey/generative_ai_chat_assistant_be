@@ -173,6 +173,60 @@ async def _create_session(
     return session_token
 
 
+async def _verify_google_access_token(access_token: str) -> dict:
+    """
+    Verify a Google OAuth2 access token server-side by calling Google's
+    userinfo endpoint. This is used when the frontend obtains an access
+    token (via initTokenClient / OAuth2 implicit flow) rather than an
+    ID token JWT.
+
+    Returns the same shape of claims as _verify_google_id_token.
+    """
+    from src.utils.http_client import get_http_client
+
+    client = get_http_client()
+    try:
+        res = await client.get(
+            "https://www.googleapis.com/oauth2/v3/userinfo",
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=10.0,
+        )
+    except Exception as exc:
+        raise ValueError(f"Failed to reach Google userinfo endpoint: {exc}") from exc
+
+    if res.status_code != 200:
+        err_msg = "Google access token verification failed"
+        try:
+            err_data = res.json()
+            err_msg = err_data.get("error_description") or err_data.get("error", err_msg)
+        except Exception:
+            pass
+        raise ValueError(err_msg)
+
+    info = res.json()
+
+    if not info.get("sub"):
+        raise ValueError("Google userinfo response missing 'sub' claim")
+
+    email_verified = info.get("email_verified")
+    if str(email_verified).lower() not in ("true", "1", "yes"):
+        raise ValueError("Google account email is not verified")
+
+    if not info.get("email"):
+        raise ValueError("No email in Google userinfo response")
+
+    # Normalise to same shape as ID token claims
+    return {
+        "sub": info["sub"],
+        "email": info["email"],
+        "email_verified": info.get("email_verified", True),
+        "name": info.get("name"),
+        "given_name": info.get("given_name"),
+        "picture": info.get("picture"),
+        "iss": "accounts.google.com",  # implied by successful userinfo call
+    }
+
+
 @router.post("/google")
 async def google_sign_in(
     payload: GoogleAuthRequest,
@@ -181,22 +235,39 @@ async def google_sign_in(
     db: aiosqlite.Connection = Depends(get_db),
 ):
     """
-    Authenticate a user using a Google ID token with server-side verification.
-    The ``credential`` field is REQUIRED (audit S1 fix).
-    Direct email/name attributes are rejected.
+    Authenticate a user using a Google credential with server-side verification.
+
+    Accepts either:
+      • ``credential`` — a Google ID token JWT (verified via google-auth or tokeninfo)
+      • ``access_token`` — a Google OAuth2 access token (verified via Google userinfo API)
+
+    Direct email/name attributes alone are rejected (audit S1 fix).
     """
-    if not payload.credential:
+    claims = None
+
+    # Path 1: ID token JWT (credential field)
+    if payload.credential:
+        try:
+            claims = await _verify_google_id_token(payload.credential)
+        except ValueError as err:
+            logger.warning("Google ID token rejected: %s", err)
+            raise HTTPException(status_code=401, detail=str(err))
+
+    # Path 2: OAuth2 access token
+    elif payload.access_token:
+        try:
+            claims = await _verify_google_access_token(payload.access_token)
+        except ValueError as err:
+            logger.warning("Google access token rejected: %s", err)
+            raise HTTPException(status_code=401, detail=str(err))
+
+    # Path 3: No verifiable token at all — reject
+    else:
         raise HTTPException(
             status_code=400,
-            detail="A valid Google ID token (credential) is required. "
+            detail="A valid Google credential is required. "
                    "Direct email sign-in is not supported for security.",
         )
-
-    try:
-        claims = await _verify_google_id_token(payload.credential)
-    except ValueError as err:
-        logger.warning("Google sign-in rejected: %s", err)
-        raise HTTPException(status_code=401, detail=str(err))
 
     email = claims["email"].strip().lower()
     name = claims.get("name") or claims.get("given_name") or email.split("@")[0].replace(".", " ").title()

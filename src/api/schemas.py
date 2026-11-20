@@ -196,6 +196,7 @@ class HealthResponse(BaseModel):
 class GoogleAuthRequest(BaseModel):
     """Request payload for Google sign-in."""
     credential: Optional[str] = Field(None, description="Google OAuth ID token JWT")
+    access_token: Optional[str] = Field(None, description="Google OAuth2 access token")
     email: Optional[str] = Field(None, description="User email (for demo/fallback)")
     name: Optional[str] = Field(None, description="User display name")
     picture: Optional[str] = Field(None, description="User avatar image URL")
