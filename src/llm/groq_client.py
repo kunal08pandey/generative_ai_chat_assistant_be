@@ -198,12 +198,13 @@ class GroqClient(BaseLLM):
         }
         data = {
             "model": model,
-            "response_format": "json",
+            "response_format": "verbose_json",
+            "temperature": "0",
         }
         if language:
             data["language"] = language
-        if prompt:
-            data["prompt"] = prompt
+        # Use a guiding prompt to suppress Whisper hallucinations on silence/noise
+        data["prompt"] = prompt if prompt else "Transcribe the user's spoken message."
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             try:
