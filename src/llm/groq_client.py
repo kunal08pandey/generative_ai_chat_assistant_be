@@ -25,6 +25,31 @@ from src.utils.token_counter import count_tokens
 logger = get_logger(__name__)
 
 
+WHISPER_SILENCE_HALLUCINATIONS = {
+    "thank you",
+    "thank you.",
+    "thank you!",
+    "thank you very much",
+    "thank you very much.",
+    "thanks for watching",
+    "thanks for watching.",
+    "thanks for watching!",
+    "thank you for watching",
+    "thank you for watching.",
+    "thank you for watching!",
+    "please subscribe",
+    "subscribe to my channel",
+    "subtitles by",
+    "subtitles by the amara.org community",
+    "bye",
+    "bye.",
+    "bye bye",
+    "goodbye",
+    "you",
+    "you.",
+}
+
+
 class GroqClient(BaseLLM):
     """
     Groq LPU Inference client implementing BaseLLM.
@@ -198,13 +223,13 @@ class GroqClient(BaseLLM):
         }
         data = {
             "model": model,
-            "response_format": "verbose_json",
+            "response_format": "json",
             "temperature": "0",
         }
         if language:
             data["language"] = language
-        # Use a guiding prompt to suppress Whisper hallucinations on silence/noise
-        data["prompt"] = prompt if prompt else "Transcribe the user's spoken message."
+        if prompt:
+            data["prompt"] = prompt
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             try:
@@ -230,7 +255,13 @@ class GroqClient(BaseLLM):
                     raise RuntimeError(f"Groq Whisper transcription failed ({res.status_code}): {err_msg}")
 
             payload = res.json()
-            return payload.get("text", "").strip()
+            raw_text = payload.get("text", "").strip()
+            # Suppress silence/noise hallucinations
+            normalized = raw_text.lower().strip(" .!?,:;\"'~")
+            if normalized in WHISPER_SILENCE_HALLUCINATIONS:
+                logger.info("Filtered Whisper silence hallucination: %r", raw_text)
+                return ""
+            return raw_text
 
     def __init__(self, model: str, api_key: Optional[str] = None):
         """
